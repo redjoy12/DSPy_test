@@ -1,0 +1,478 @@
+"""PromptForge — Streamlit UI for DSPy-powered prompt engineering."""
+
+import difflib
+import json
+import os
+
+import streamlit as st
+
+from src.config import configure_lm
+from src.store.prompt_store import PromptStore
+
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+def init_session_state():
+    defaults = {
+        "api_key": "",
+        "models": [],
+        "selected_model": None,
+        "prompts_dir": "prompts",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def fetch_models(api_key: str) -> list[str]:
+    """Call OpenAI API and return sorted list of chat model IDs."""
+    import openai
+
+    client = openai.OpenAI(api_key=api_key)
+    models = client.models.list()
+    chat_prefixes = ("gpt-3.5", "gpt-4", "chatgpt", "o1", "o3", "o4")
+    chat_models = sorted(
+        m.id for m in models.data if m.id.startswith(chat_prefixes)
+    )
+    return chat_models
+
+
+def format_model_for_dspy(model_id: str) -> str:
+    """Prepend ``openai/`` prefix if missing (DSPy convention)."""
+    if not model_id.startswith("openai/"):
+        return f"openai/{model_id}"
+    return model_id
+
+
+def get_store() -> PromptStore:
+    return PromptStore(base_dir=st.session_state["prompts_dir"])
+
+
+def ensure_lm_configured(model: str):
+    """Set the API key env-var and configure DSPy's global LM."""
+    os.environ["OPENAI_API_KEY"] = st.session_state["api_key"]
+    configure_lm(model=format_model_for_dspy(model))
+
+
+def require_api_key() -> bool:
+    """Return True if an API key is set; show warning otherwise."""
+    if not st.session_state["api_key"]:
+        st.warning("Please enter your OpenAI API key in the sidebar.")
+        return False
+    return True
+
+
+def display_score(label: str, score: float):
+    """Render a score with color coding."""
+    if score >= 0.8:
+        color = "green"
+    elif score >= 0.5:
+        color = "orange"
+    else:
+        color = "red"
+    st.markdown(f"**{label}:** :{color}[{score:.2f}]")
+
+
+def render_diff(text_a: str, text_b: str, label_a: str = "Before", label_b: str = "After"):
+    """Show a unified diff between two texts."""
+    diff = difflib.unified_diff(
+        text_a.splitlines(keepends=True),
+        text_b.splitlines(keepends=True),
+        fromfile=label_a,
+        tofile=label_b,
+    )
+    diff_text = "".join(diff)
+    if diff_text:
+        st.code(diff_text, language="diff")
+    else:
+        st.info("No differences found.")
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+def render_sidebar():
+    with st.sidebar:
+        st.header("Settings")
+
+        # API key
+        api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=st.session_state["api_key"],
+            help="Required for Create, Iterate, and Optimize tabs.",
+        )
+        if api_key != st.session_state["api_key"]:
+            st.session_state["api_key"] = api_key
+            if api_key:
+                try:
+                    st.session_state["models"] = fetch_models(api_key)
+                except Exception as exc:
+                    st.error(f"Failed to fetch models: {exc}")
+                    st.session_state["models"] = []
+            else:
+                st.session_state["models"] = []
+
+        # Status indicator
+        if st.session_state["api_key"]:
+            st.success("API key configured")
+        else:
+            st.info("API key not set")
+
+        # Model selector
+        models = st.session_state["models"]
+        if models:
+            selected = st.selectbox("Default model", models)
+            st.session_state["selected_model"] = selected
+        else:
+            st.selectbox("Default model", ["(enter API key first)"], disabled=True)
+
+        # Prompts directory
+        prompts_dir = st.text_input(
+            "Prompts directory",
+            value=st.session_state["prompts_dir"],
+            help="Directory where prompt versions are stored.",
+        )
+        st.session_state["prompts_dir"] = prompts_dir
+
+
+# ---------------------------------------------------------------------------
+# Tab 3: Browse Versions
+# ---------------------------------------------------------------------------
+
+def render_browse_tab():
+    store = get_store()
+    prompts = store.list_prompts()
+
+    if not prompts:
+        st.info("No prompts found. Create one in the **Create** tab first.")
+        return
+
+    selected_name = st.selectbox("Prompt name", prompts, key="browse_prompt_name")
+
+    versions = store.list_versions(selected_name)
+    if not versions:
+        st.info("No versions found for this prompt.")
+        return
+
+    # --- Version detail ---
+    st.subheader("Version Detail")
+    selected_version = st.selectbox(
+        "Version", versions, index=len(versions) - 1, key="browse_version"
+    )
+    ver = store.load(selected_name, selected_version)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Version:** {ver.version}")
+        st.markdown(f"**Pipeline:** {ver.pipeline}")
+        st.markdown(f"**Model:** {ver.model}")
+        display_score("Quality score", ver.quality_score)
+    with col2:
+        st.markdown(f"**Timestamp:** {ver.timestamp}")
+        st.markdown(f"**Parent version:** {ver.parent_version or 'None'}")
+        if ver.description:
+            st.markdown(f"**Description:** {ver.description}")
+
+    st.text_area("Prompt text", ver.prompt_text, height=200, disabled=True, key="browse_prompt_text")
+    st.text_area("Judge feedback", ver.judge_feedback, height=100, disabled=True, key="browse_feedback")
+
+    if ver.change_request:
+        st.markdown(f"**Change request:** {ver.change_request}")
+    if ver.changes_made:
+        st.markdown(f"**Changes made:** {ver.changes_made}")
+
+    # --- Side-by-side comparison ---
+    if len(versions) >= 2:
+        st.divider()
+        st.subheader("Compare Versions")
+        comp_col1, comp_col2 = st.columns(2)
+        with comp_col1:
+            v_a = st.selectbox("Version A", versions, index=0, key="compare_a")
+        with comp_col2:
+            v_b = st.selectbox(
+                "Version B", versions, index=len(versions) - 1, key="compare_b"
+            )
+
+        if v_a != v_b:
+            ver_a = store.load(selected_name, v_a)
+            ver_b = store.load(selected_name, v_b)
+            render_diff(ver_a.prompt_text, ver_b.prompt_text, f"v{v_a}", f"v{v_b}")
+        else:
+            st.info("Select two different versions to compare.")
+
+
+# ---------------------------------------------------------------------------
+# Tab 1: Create Prompt
+# ---------------------------------------------------------------------------
+
+def render_create_tab():
+    if not require_api_key():
+        return
+
+    models = st.session_state["models"]
+    if not models:
+        st.warning("No models available. Check your API key.")
+        return
+
+    with st.form("create_form"):
+        name = st.text_input("Prompt name", help="Identifier for this prompt (e.g. 'email-assistant').")
+        description = st.text_input("Description", help="What the prompt should do.")
+        context = st.text_area(
+            "Context (optional)", help="Target audience, tone, constraints, etc."
+        )
+        model = st.selectbox("Model", models, key="create_model")
+        min_score = st.slider(
+            "Minimum quality score", 0.0, 1.0, 0.0, 0.05,
+            help="Set above 0 to reject low-quality prompts.",
+        )
+        submitted = st.form_submit_button("Create Prompt")
+
+    if submitted:
+        if not name or not description:
+            st.error("Name and description are required.")
+            return
+
+        try:
+            ensure_lm_configured(model)
+            from src.pipelines.create_prompt import CreatePromptPipeline
+
+            store = get_store()
+            pipeline = CreatePromptPipeline(store=store)
+            with st.spinner("Generating prompt..."):
+                version = pipeline.create_and_save(
+                    name=name,
+                    description=description,
+                    context=context,
+                    min_score=min_score if min_score > 0 else None,
+                )
+
+            st.success(f"Prompt **{name}** v{version.version} created!")
+            st.text_area("Generated prompt", version.prompt_text, height=200, disabled=True)
+            display_score("Quality score", version.quality_score)
+            st.text_area("Judge feedback", version.judge_feedback, height=100, disabled=True)
+
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Tab 2: Iterate Prompt
+# ---------------------------------------------------------------------------
+
+def render_iterate_tab():
+    if not require_api_key():
+        return
+
+    models = st.session_state["models"]
+    if not models:
+        st.warning("No models available. Check your API key.")
+        return
+
+    store = get_store()
+    prompts = store.list_prompts()
+
+    if not prompts:
+        st.info("No prompts found. Create one in the **Create** tab first.")
+        return
+
+    selected_name = st.selectbox("Prompt name", prompts, key="iterate_prompt_name")
+
+    # Show current latest prompt
+    try:
+        latest = store.load_latest(selected_name)
+        st.text_area(
+            f"Current prompt (v{latest.version})",
+            latest.prompt_text,
+            height=150,
+            disabled=True,
+            key="iterate_current",
+        )
+        before_text = latest.prompt_text
+    except FileNotFoundError:
+        st.warning("Could not load latest version.")
+        return
+
+    with st.form("iterate_form"):
+        change_request = st.text_area("Change request", help="What to add, modify, or fix.")
+        failing_examples = st.text_area(
+            "Failing examples (optional)",
+            help="Input/output pairs where the current prompt fails.",
+        )
+        model = st.selectbox("Model", models, key="iterate_model")
+        min_score = st.slider(
+            "Minimum improvement score", 0.0, 1.0, 0.0, 0.05,
+            help="Set above 0 to reject low-quality iterations.",
+        )
+        submitted = st.form_submit_button("Iterate Prompt")
+
+    if submitted:
+        if not change_request:
+            st.error("Change request is required.")
+            return
+
+        try:
+            ensure_lm_configured(model)
+            from src.pipelines.iterate_prompt import IteratePromptPipeline
+
+            pipeline = IteratePromptPipeline(store=store)
+            with st.spinner("Iterating prompt..."):
+                version = pipeline.iterate_and_save(
+                    name=selected_name,
+                    change_request=change_request,
+                    failing_examples=failing_examples,
+                    min_score=min_score if min_score > 0 else None,
+                )
+
+            st.success(f"Prompt **{selected_name}** v{version.version} created!")
+
+            # Side-by-side before/after
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Before**")
+                st.text_area("Before", before_text, height=200, disabled=True, key="iter_before")
+            with col2:
+                st.markdown("**After**")
+                st.text_area("After", version.prompt_text, height=200, disabled=True, key="iter_after")
+
+            display_score("Improvement score", version.quality_score)
+            if version.changes_made:
+                st.markdown(f"**Changes made:** {version.changes_made}")
+            st.text_area("Judge feedback", version.judge_feedback, height=100, disabled=True, key="iter_feedback")
+
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Tab 4: Optimize
+# ---------------------------------------------------------------------------
+
+def render_optimize_tab():
+    if not require_api_key():
+        return
+
+    models = st.session_state["models"]
+    if not models:
+        st.warning("No models available. Check your API key.")
+        return
+
+    import dspy
+    from src.evaluation.judge import make_comparison_metric, make_quality_metric
+    from src.optimizer import OptimizerRunner
+
+    pipeline_choice = st.selectbox(
+        "Pipeline", ["Create", "Iterate"], key="optimize_pipeline"
+    )
+
+    training_json = st.text_area(
+        "Training examples (JSON)",
+        height=200,
+        help=(
+            "JSON array of objects. For Create: [{\"description\": ..., \"context\": ...}]. "
+            "For Iterate: [{\"current_prompt\": ..., \"change_request\": ...}]."
+        ),
+    )
+
+    # Auto-detect optimizer
+    try:
+        examples = json.loads(training_json) if training_json.strip() else []
+    except json.JSONDecodeError:
+        examples = []
+
+    runner = OptimizerRunner()
+    if examples:
+        optimizer_cls = runner.select_optimizer(len(examples))
+        st.info(f"Auto-selected optimizer: **{optimizer_cls.__name__}** (based on {len(examples)} examples)")
+    else:
+        st.info("Enter training examples to auto-select an optimizer.")
+
+    save_path = st.text_input(
+        "Save path (optional)",
+        help="File path to save the optimized program.",
+    )
+
+    if st.button("Run Optimization", key="optimize_run"):
+        if not training_json.strip():
+            st.error("Training examples are required.")
+            return
+
+        try:
+            parsed = json.loads(training_json)
+        except json.JSONDecodeError as exc:
+            st.error(f"Invalid JSON: {exc}")
+            return
+
+        if not isinstance(parsed, list) or not parsed:
+            st.error("Training examples must be a non-empty JSON array.")
+            return
+
+        try:
+            ensure_lm_configured(st.session_state["selected_model"])
+
+            trainset = [dspy.Example(**ex).with_inputs(*ex.keys()) for ex in parsed]
+
+            if pipeline_choice == "Create":
+                from src.pipelines.create_prompt import CreatePromptPipeline
+                program = CreatePromptPipeline()
+                metric = make_quality_metric()
+            else:
+                from src.pipelines.iterate_prompt import IteratePromptPipeline
+                program = IteratePromptPipeline()
+                metric = make_comparison_metric()
+
+            with st.spinner("Running optimization (this may take a while)..."):
+                optimized = runner.optimize(
+                    program=program,
+                    trainset=trainset,
+                    metric=metric,
+                    save_path=save_path if save_path else None,
+                )
+
+            st.success("Optimization complete!")
+            if save_path:
+                st.info(f"Optimized program saved to `{save_path}`.")
+
+        except Exception as exc:
+            st.error(f"Optimization failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    st.set_page_config(page_title="PromptForge", layout="wide")
+    st.title("PromptForge")
+    st.caption("DSPy-powered prompt engineering")
+
+    init_session_state()
+    render_sidebar()
+
+    tab_create, tab_iterate, tab_browse, tab_optimize = st.tabs(
+        ["Create", "Iterate", "Browse", "Optimize"]
+    )
+
+    with tab_create:
+        render_create_tab()
+    with tab_iterate:
+        render_iterate_tab()
+    with tab_browse:
+        render_browse_tab()
+    with tab_optimize:
+        render_optimize_tab()
+
+
+if __name__ == "__main__":
+    main()
