@@ -149,3 +149,24 @@ class TestIterateAndSave:
         latest = store.load_latest("test_prompt")
         assert latest.version == 4
         assert latest.parent_version == 3
+
+    def test_iterate_and_save_rejects_low_quality_with_min_score(self, store):
+        """When min_score is set and the iteration scores below it, ValueError is raised."""
+        self._create_v1(store)
+
+        lm = DummyLM([
+            {
+                "reasoning": "Weak iteration.",
+                "improved_prompt": "A bad prompt.",
+                "changes_made": "Made it worse.",
+            },
+            {"reasoning": "Poor.", "improvement_score": "0.3", "feedback": "Low quality."},
+        ])
+        with dspy.context(lm=lm):
+            pipeline = IteratePromptPipeline(store=store)
+            with pytest.raises(ValueError, match="below minimum threshold"):
+                pipeline.iterate_and_save(
+                    name="test_prompt",
+                    change_request="Make it worse",
+                    min_score=0.5,
+                )

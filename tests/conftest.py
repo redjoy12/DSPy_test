@@ -5,6 +5,13 @@ from dspy.utils import DummyLM
 from src.store.prompt_store import PromptStore
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "integration: marks tests as integration tests requiring real LLM (deselect with '-m \"not integration\"')",
+    )
+
+
 @pytest.fixture
 def store(tmp_path):
     """Real file-backed prompt store using a temporary directory."""

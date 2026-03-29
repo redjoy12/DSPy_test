@@ -8,6 +8,8 @@ from src.evaluation.judge import (
     PromptComparisonSignature,
     make_quality_metric,
     make_comparison_metric,
+    prompt_quality_metric,
+    prompt_comparison_metric,
     QUALITY_THRESHOLD,
 )
 
@@ -152,3 +154,59 @@ class TestMakeComparisonMetric:
             pred = dspy.Example(improved_prompt="New.")
             result = metric(example, pred, trace="t")
         assert result is True
+
+
+class TestConvenienceMetricFunctions:
+    def test_prompt_quality_metric_returns_float(self):
+        """Module-level alias returns a float score."""
+        lm = DummyLM([
+            {"reasoning": "Good", "quality_score": "0.8", "feedback": "Nice"},
+            {"reasoning": "Good", "quality_score": "0.9", "feedback": "Great"},
+        ])
+        with dspy.context(lm=lm):
+            example = dspy.Example(description="test").with_inputs("description")
+            pred = dspy.Example(prompt_text="You are a helpful assistant.")
+            score1 = prompt_quality_metric(example, pred)
+            score2 = prompt_quality_metric(example, pred)
+            assert isinstance(score1, float)
+            assert isinstance(score2, float)
+
+    def test_prompt_comparison_metric_returns_float(self):
+        """Module-level alias returns a float score."""
+        lm = DummyLM([
+            {"reasoning": "Good", "improvement_score": "0.7", "feedback": "OK"},
+            {"reasoning": "Good", "improvement_score": "0.95", "feedback": "Excellent"},
+        ])
+        with dspy.context(lm=lm):
+            example = dspy.Example(
+                current_prompt="Old prompt", change_request="Make it better"
+            ).with_inputs("current_prompt", "change_request")
+            pred = dspy.Example(improved_prompt="New prompt")
+            score1 = prompt_comparison_metric(example, pred)
+            score2 = prompt_comparison_metric(example, pred)
+            assert isinstance(score1, float)
+            assert isinstance(score2, float)
+
+    def test_prompt_quality_metric_returns_bool_with_trace(self):
+        """Convenience function respects trace argument like the factory version."""
+        lm = DummyLM([
+            {"reasoning": "x", "quality_score": "0.85", "feedback": "Good."},
+        ])
+        with dspy.context(lm=lm):
+            example = dspy.Example(description="test").with_inputs("description")
+            pred = dspy.Example(prompt_text="You are a helpful assistant.")
+            result = prompt_quality_metric(example, pred, trace="some_trace")
+            assert result is True  # 0.85 >= QUALITY_THRESHOLD (0.7)
+
+    def test_prompt_comparison_metric_returns_bool_with_trace(self):
+        """Convenience function respects trace argument like the factory version."""
+        lm = DummyLM([
+            {"reasoning": "x", "improvement_score": "0.5", "feedback": "Weak."},
+        ])
+        with dspy.context(lm=lm):
+            example = dspy.Example(
+                current_prompt="Old", change_request="Improve"
+            ).with_inputs("current_prompt", "change_request")
+            pred = dspy.Example(improved_prompt="New")
+            result = prompt_comparison_metric(example, pred, trace="t")
+            assert result is False  # 0.5 < QUALITY_THRESHOLD (0.7)

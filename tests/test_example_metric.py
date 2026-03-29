@@ -122,3 +122,19 @@ class TestExampleBasedMetric:
             metric = ExampleBasedMetric()
             score = metric.evaluate("Helper", examples)
         assert score == pytest.approx(0.75)
+
+    def test_punctuation_invariant_matching(self):
+        lm = DummyLM([{"output": "Hello, world!"}])
+        examples = [{"input": "greet", "expected_output": "Hello world"}]
+        with dspy.context(lm=lm):
+            metric = ExampleBasedMetric()
+            score = metric.evaluate("Greeter", examples)
+        assert score == 1.0
+
+    def test_all_predictions_fail_raises_runtime_error(self):
+        lm = DummyLM([])  # no responses → will raise
+        examples = [{"input": "test", "expected_output": "output"}]
+        with dspy.context(lm=lm):
+            metric = ExampleBasedMetric()
+            with pytest.raises(RuntimeError, match="All 1 example evaluations failed"):
+                metric.evaluate("Test prompt", examples)

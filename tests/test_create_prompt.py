@@ -90,6 +90,16 @@ class TestCreateAndSave:
         assert v2.version == 2
         assert store.list_versions("my_prompt") == [1, 2]
 
+    def test_create_and_save_rejects_low_quality_with_min_score(self, store):
+        lm = DummyLM([
+            {"reasoning": "Test reasoning", "prompt_text": "Bad prompt"},
+            {"reasoning": "Low quality", "quality_score": "0.3", "feedback": "Poor"},
+        ])
+        with dspy.context(lm=lm):
+            pipeline = CreatePromptPipeline(store=store)
+            with pytest.raises(ValueError, match="below minimum threshold"):
+                pipeline.create_and_save("test", "desc", min_score=0.5)
+
     def test_quality_score_from_judge_is_stored(self, store):
         """The judge's score is what gets stored, not a hardcoded value."""
         lm = DummyLM([
