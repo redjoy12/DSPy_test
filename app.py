@@ -73,7 +73,7 @@ def display_score(label: str, score: float):
     if score >= 0.8:
         color = "green"
     elif score >= 0.5:
-        color = "orange"
+        color = "yellow"
     else:
         color = "red"
     st.markdown(f"**{label}:** :{color}[{score:.2f}]")
@@ -129,7 +129,9 @@ def render_sidebar():
         # Model selector
         models = st.session_state["models"]
         if models:
-            selected = st.selectbox("Default model", models)
+            prev = st.session_state.get("selected_model")
+            default_idx = models.index(prev) if prev in models else 0
+            selected = st.selectbox("Default model", models, index=default_idx)
             st.session_state["selected_model"] = selected
         else:
             st.selectbox("Default model", ["(enter API key first)"], disabled=True)
@@ -138,9 +140,14 @@ def render_sidebar():
         prompts_dir = st.text_input(
             "Prompts directory",
             value=st.session_state["prompts_dir"],
-            help="Directory where prompt versions are stored.",
+            help="Directory where prompt versions are stored (relative path only).",
         )
-        st.session_state["prompts_dir"] = prompts_dir
+        from pathlib import PurePath
+        p = PurePath(prompts_dir)
+        if p.is_absolute() or ".." in p.parts:
+            st.error("Prompts directory must be a relative path without '..' components.")
+        else:
+            st.session_state["prompts_dir"] = prompts_dir
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +328,9 @@ def render_iterate_tab():
             return
 
         try:
+            # Capture before-text in session state before pipeline mutates the store
+            st.session_state["iterate_before_text"] = before_text
+
             ensure_lm_configured(model)
             from src.pipelines.iterate_prompt import IteratePromptPipeline
 
@@ -333,26 +343,38 @@ def render_iterate_tab():
                     min_score=min_score if min_score > 0 else None,
                 )
 
-            st.success(f"Prompt **{selected_name}** v{version.version} created!")
-
-            # Side-by-side before/after
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Before**")
-                st.text_area("Before", before_text, height=200, disabled=True, key="iter_before")
-            with col2:
-                st.markdown("**After**")
-                st.text_area("After", version.prompt_text, height=200, disabled=True, key="iter_after")
-
-            display_score("Improvement score", version.quality_score)
-            if version.changes_made:
-                st.markdown(f"**Changes made:** {version.changes_made}")
-            st.text_area("Judge feedback", version.judge_feedback, height=100, disabled=True, key="iter_feedback")
+            st.session_state["iterate_result"] = {
+                "name": selected_name,
+                "version": version.version,
+                "prompt_text": version.prompt_text,
+                "quality_score": version.quality_score,
+                "changes_made": version.changes_made,
+                "judge_feedback": version.judge_feedback,
+            }
 
         except ValueError as exc:
             st.error(str(exc))
         except Exception as exc:
             st.error(f"Error: {exc}")
+
+    # Display results from session state (survives reruns)
+    result = st.session_state.get("iterate_result")
+    if result and result["name"] == selected_name:
+        st.success(f"Prompt **{result['name']}** v{result['version']} created!")
+
+        saved_before = st.session_state.get("iterate_before_text", "")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Before**")
+            st.text_area("Before", saved_before, height=200, disabled=True, key="iter_before")
+        with col2:
+            st.markdown("**After**")
+            st.text_area("After", result["prompt_text"], height=200, disabled=True, key="iter_after")
+
+        display_score("Improvement score", result["quality_score"])
+        if result["changes_made"]:
+            st.markdown(f"**Changes made:** {result['changes_made']}")
+        st.text_area("Judge feedback", result["judge_feedback"], height=100, disabled=True, key="iter_feedback")
 
 
 # ---------------------------------------------------------------------------
@@ -368,42 +390,28 @@ def render_optimize_tab():
         st.warning("No models available. Check your API key.")
         return
 
-    import dspy
-    from src.evaluation.judge import make_comparison_metric, make_quality_metric
-    from src.optimizer import OptimizerRunner
+    with st.form("optimize_form"):
+        pipeline_choice = st.selectbox(
+            "Pipeline", ["Create", "Iterate"], key="optimize_pipeline"
+        )
 
-    pipeline_choice = st.selectbox(
-        "Pipeline", ["Create", "Iterate"], key="optimize_pipeline"
-    )
+        training_json = st.text_area(
+            "Training examples (JSON)",
+            height=200,
+            help=(
+                "JSON array of objects. For Create: [{\"description\": ..., \"context\": ...}]. "
+                "For Iterate: [{\"current_prompt\": ..., \"change_request\": ...}]."
+            ),
+        )
 
-    training_json = st.text_area(
-        "Training examples (JSON)",
-        height=200,
-        help=(
-            "JSON array of objects. For Create: [{\"description\": ..., \"context\": ...}]. "
-            "For Iterate: [{\"current_prompt\": ..., \"change_request\": ...}]."
-        ),
-    )
+        save_path = st.text_input(
+            "Save path (optional)",
+            help="File path to save the optimized program.",
+        )
 
-    # Auto-detect optimizer
-    try:
-        examples = json.loads(training_json) if training_json.strip() else []
-    except json.JSONDecodeError:
-        examples = []
+        submitted = st.form_submit_button("Run Optimization")
 
-    runner = OptimizerRunner()
-    if examples:
-        optimizer_cls = runner.select_optimizer(len(examples))
-        st.info(f"Auto-selected optimizer: **{optimizer_cls.__name__}** (based on {len(examples)} examples)")
-    else:
-        st.info("Enter training examples to auto-select an optimizer.")
-
-    save_path = st.text_input(
-        "Save path (optional)",
-        help="File path to save the optimized program.",
-    )
-
-    if st.button("Run Optimization", key="optimize_run"):
+    if submitted:
         if not training_json.strip():
             st.error("Training examples are required.")
             return
@@ -419,17 +427,29 @@ def render_optimize_tab():
             return
 
         try:
+            import dspy
+            from src.evaluation.judge import make_comparison_metric, make_quality_metric
+            from src.optimizer import OptimizerRunner
+
             ensure_lm_configured(st.session_state["selected_model"])
 
-            trainset = [dspy.Example(**ex).with_inputs(*ex.keys()) for ex in parsed]
+            if pipeline_choice == "Create":
+                input_keys = ["description", "context"]
+            else:
+                input_keys = ["current_prompt", "change_request", "failing_examples"]
+            trainset = [dspy.Example(**ex).with_inputs(*input_keys) for ex in parsed]
+
+            runner = OptimizerRunner()
+            optimizer_cls = runner.select_optimizer(len(parsed))
+            st.info(f"Using optimizer: **{optimizer_cls.__name__}** (based on {len(parsed)} examples)")
 
             if pipeline_choice == "Create":
                 from src.pipelines.create_prompt import CreatePromptPipeline
-                program = CreatePromptPipeline()
+                program = CreatePromptPipeline(store=get_store())
                 metric = make_quality_metric()
             else:
                 from src.pipelines.iterate_prompt import IteratePromptPipeline
-                program = IteratePromptPipeline()
+                program = IteratePromptPipeline(store=get_store())
                 metric = make_comparison_metric()
 
             with st.spinner("Running optimization (this may take a while)..."):
