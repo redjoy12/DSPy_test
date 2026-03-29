@@ -88,21 +88,6 @@ def make_comparison_metric(judge=None):
     return metric
 
 
-_cached_quality_metric = None
-_cached_comparison_metric = None
-
-
-def prompt_quality_metric(example, pred, trace=None) -> float:
-    """Convenience wrapper that caches the quality metric on first call."""
-    global _cached_quality_metric
-    if _cached_quality_metric is None:
-        _cached_quality_metric = make_quality_metric()
-    return _cached_quality_metric(example, pred, trace)
-
-
-def prompt_comparison_metric(example, pred, trace=None) -> float:
-    """Convenience wrapper that caches the comparison metric on first call."""
-    global _cached_comparison_metric
-    if _cached_comparison_metric is None:
-        _cached_comparison_metric = make_comparison_metric()
-    return _cached_comparison_metric(example, pred, trace)
+# Module-level convenience aliases — share a single judge instance per process.
+prompt_quality_metric = make_quality_metric()
+prompt_comparison_metric = make_comparison_metric()

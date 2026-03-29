@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,7 +66,19 @@ class PromptStore:
     def __init__(self, base_dir: Path | str = "prompts"):
         self.base_dir = Path(base_dir)
 
+    @staticmethod
+    def validate_name(name: str) -> None:
+        """Reject prompt names that could escape the base directory."""
+        if not name or not re.match(r'^[\w\-. ]+$', name):
+            raise ValueError(
+                "Prompt name may only contain letters, digits, hyphens, "
+                "underscores, dots, and spaces."
+            )
+        if name.strip('. ') == '':
+            raise ValueError("Prompt name cannot consist only of dots and spaces.")
+
     def save(self, name: str, version: PromptVersion) -> Path:
+        self.validate_name(name)
         prompt_dir = self.base_dir / name
         prompt_dir.mkdir(parents=True, exist_ok=True)
         path = prompt_dir / f"v{version.version}.json"
@@ -73,6 +86,7 @@ class PromptStore:
         return path
 
     def load(self, name: str, version: int) -> PromptVersion:
+        self.validate_name(name)
         path = self.base_dir / name / f"v{version}.json"
         if not path.exists():
             raise FileNotFoundError(f"Prompt '{name}' version {version} not found at {path}")

@@ -34,7 +34,8 @@ class CreatePromptPipeline(dspy.Module):
         name: str,
         description: str,
         context: str = "",
-        model: str = "openai/gpt-4o-mini",
+        model: str | None = None,
+        min_score: float | None = None,
     ) -> PromptVersion:
         """Generate a prompt from a description, evaluate it, and save a versioned record.
 
@@ -42,19 +43,41 @@ class CreatePromptPipeline(dspy.Module):
             name: Identifier used to group prompt versions in the store.
             description: Human-language description of what the prompt should do.
             context: Optional target-audience, tone, or constraint hints.
-            model: Recorded in version metadata for audit/traceability purposes
-                only. This value does **not** control which LLM is used for
-                generation — the active LLM is determined globally by
-                ``configure_lm()`` (see ``src/config.py``).
+            model: The LLM to use for generation and judging.  When provided,
+                a ``dspy.LM`` is created and used for this call.  When
+                ``None`` (the default), the globally configured LM is used.
+            min_score: Optional minimum quality score threshold. If provided and
+                the generated prompt scores below this value, a ``ValueError``
+                is raised and the prompt is **not** saved.
 
         Returns:
             The newly created ``PromptVersion``.
+
+        Raises:
+            ValueError: If *min_score* is set and the prompt scores below it.
         """
-        result = self.forward(description=description, context=context)
-        score, feedback = self.judge.evaluate_quality(
-            prompt_text=result.prompt_text,
-            description=description,
-        )
+        if model is not None:
+            lm = dspy.LM(model)
+            ctx = dspy.context(lm=lm)
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            result = self.forward(description=description, context=context)
+            score, feedback = self.judge.evaluate_quality(
+                prompt_text=result.prompt_text,
+                description=description,
+            )
+
+        if min_score is not None and score < min_score:
+            raise ValueError(
+                f"Generated prompt scored {score:.2f}, below minimum threshold {min_score:.2f}. "
+                f"Feedback: {feedback}"
+            )
+
+        # Record the actual model used in metadata.
+        actual_model = model or getattr(getattr(dspy.settings, 'lm', None), 'model', 'unknown')
         version_num = self.store.get_next_version(name)
         version = PromptVersion(
             version=version_num,
@@ -64,7 +87,7 @@ class CreatePromptPipeline(dspy.Module):
             quality_score=score,
             judge_feedback=feedback,
             pipeline="create",
-            model=model,
+            model=actual_model,
         )
         self.store.save(name, version)
         return version

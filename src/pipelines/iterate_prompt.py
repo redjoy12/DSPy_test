@@ -47,7 +47,8 @@ class IteratePromptPipeline(dspy.Module):
         current_prompt: str | None = None,
         description: str | None = None,
         failing_examples: str = "",
-        model: str = "openai/gpt-4o-mini",
+        model: str | None = None,
+        min_score: float | None = None,
     ) -> PromptVersion:
         """Improve an existing prompt, evaluate the result, and save a new version.
 
@@ -64,13 +65,18 @@ class IteratePromptPipeline(dspy.Module):
                 *current_prompt* is loaded from the store.
             failing_examples: Optional input/output pairs where the current
                 prompt fails, used to guide improvements.
-            model: Recorded in version metadata for audit/traceability purposes
-                only. This value does **not** control which LLM is used for
-                generation — the active LLM is determined globally by
-                ``configure_lm()`` (see ``src/config.py``).
+            model: The LLM to use for generation and judging.  When provided,
+                a ``dspy.LM`` is created and used for this call.  When
+                ``None`` (the default), the globally configured LM is used.
+            min_score: Optional minimum quality score threshold. If provided and
+                the iterated prompt scores below this value, a ``ValueError``
+                is raised and the prompt is **not** saved.
 
         Returns:
             The newly created ``PromptVersion``.
+
+        Raises:
+            ValueError: If *min_score* is set and the prompt scores below it.
         """
         if current_prompt is None:
             latest = self.store.load_latest(name)
@@ -82,18 +88,34 @@ class IteratePromptPipeline(dspy.Module):
             parent_version = max(existing) if existing else None
             description = description or ""
 
-        result = self.forward(
-            current_prompt=current_prompt,
-            change_request=change_request,
-            failing_examples=failing_examples,
-        )
+        if model is not None:
+            lm = dspy.LM(model)
+            ctx = dspy.context(lm=lm)
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
 
-        score, feedback = self.judge.evaluate_comparison(
-            original_prompt=current_prompt,
-            improved_prompt=result.improved_prompt,
-            change_request=change_request,
-        )
+        with ctx:
+            result = self.forward(
+                current_prompt=current_prompt,
+                change_request=change_request,
+                failing_examples=failing_examples,
+            )
 
+            score, feedback = self.judge.evaluate_comparison(
+                original_prompt=current_prompt,
+                improved_prompt=result.improved_prompt,
+                change_request=change_request,
+            )
+
+        if min_score is not None and score < min_score:
+            raise ValueError(
+                f"Generated prompt scored {score:.2f}, below minimum threshold {min_score:.2f}. "
+                f"Feedback: {feedback}"
+            )
+
+        # Record the actual model used in metadata.
+        actual_model = model or getattr(getattr(dspy.settings, 'lm', None), 'model', 'unknown')
         version_num = self.store.get_next_version(name)
         version = PromptVersion(
             version=version_num,
@@ -105,7 +127,7 @@ class IteratePromptPipeline(dspy.Module):
             quality_score=score,
             judge_feedback=feedback,
             pipeline="iterate",
-            model=model,
+            model=actual_model,
         )
         self.store.save(name, version)
         return version

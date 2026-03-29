@@ -1,4 +1,5 @@
 import logging
+import re
 
 import dspy
 
@@ -18,8 +19,9 @@ class ExampleBasedMetric:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Lowercase, strip, and split text into tokens on whitespace."""
-        return text.strip().lower().split()
+        """Lowercase, strip, remove punctuation, and split text into tokens on whitespace."""
+        cleaned = re.sub(r'[^\w\s]', '', text.strip().lower())
+        return cleaned.split()
 
     @staticmethod
     def _token_overlap_score(actual: str, expected: str) -> float:
@@ -44,6 +46,7 @@ class ExampleBasedMetric:
             return 0.0
 
         total_score = 0.0
+        failures = 0
         for ex in examples:
             try:
                 result = self.predict(
@@ -58,6 +61,19 @@ class ExampleBasedMetric:
                 else:
                     total_score += self._token_overlap_score(actual, expected)
             except Exception:
+                failures += 1
                 logger.warning("Prediction failed for input: %s", ex.get("input", "?"), exc_info=True)
+
+        if failures == len(examples):
+            raise RuntimeError(
+                f"All {len(examples)} example evaluations failed. "
+                "Check LLM configuration and API connectivity."
+            )
+
+        if failures > 0:
+            logger.warning(
+                "%d of %d evaluations failed; score based on %d successful evaluations",
+                failures, len(examples), len(examples) - failures,
+            )
 
         return total_score / len(examples)
