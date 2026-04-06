@@ -5,7 +5,21 @@ class ExtractPatternSignature(dspy.Signature):
     """Extract the general pattern and root cause from failing examples.
 
     Transform concrete failing examples into abstract patterns that describe
-    the underlying issue without copying specific scenarios verbatim."""
+    the underlying issue without copying specific scenarios verbatim.
+
+    HARD CONSTRAINT: Describe the failure mode at the level of *categories of
+    input*, not specific inputs. Do NOT mention any specific entity name,
+    product, brand, person, place, account, ID, number, date, version string,
+    or quote from the failing example. If you would otherwise reference a
+    specific thing, describe its category instead (e.g. "the product the user
+    asked about" rather than "Acme Pro v3.2").
+
+    Concrete contrast:
+      Bad pattern:  "Bot says 'I don't know' when asked about Acme Pro v3.2
+                     pricing on Tuesdays."
+      Good pattern: "Bot returns generic non-answers when asked about specific
+                     product details it could look up."
+    """
 
     failing_examples: str = dspy.InputField(
         desc="concrete failing examples (input/output pairs or conversation logs)"
@@ -14,13 +28,13 @@ class ExtractPatternSignature(dspy.Signature):
         desc="what the user wants to add, modify, or fix"
     )
     issue: str = dspy.OutputField(
-        desc="general description of what's wrong (e.g., 'Bot responds generically to specific queries')"
+        desc="general description of what's wrong, with NO specific names/numbers/quotes (e.g., 'Bot responds generically to specific queries')"
     )
     pattern: str = dspy.OutputField(
-        desc="what the user was trying to do and what happened (general pattern, not specific case)"
+        desc="what the user was trying to do and what happened, stated as a general category of input/output, NOT the specific case"
     )
     root_cause: str = dspy.OutputField(
-        desc="what the prompt is missing that causes this failure"
+        desc="what the prompt is missing that causes this failure, stated as a general principle"
     )
 
 

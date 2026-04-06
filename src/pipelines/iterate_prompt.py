@@ -7,6 +7,7 @@ import dspy
 
 from src.evaluation.judge import PromptQualityJudge
 from src.pipelines.abstract_pattern import PatternExtractor, format_abstracted_patterns
+from src.pipelines.consolidate_prompt import PromptConsolidator
 from src.store.prompt_store import PromptStore, PromptVersion
 from src.validation.generality_validator import (
     validate_generalization,
@@ -23,7 +24,25 @@ class IteratePromptSignature(dspy.Signature):
     IMPORTANT: When failing examples are provided, focus on fixing the GENERAL PRINCIPLE
     or ROOT CAUSE of the failure, NOT on adding the specific scenario verbatim.
     The improved prompt should work for any case matching the pattern, not just the
-    exact examples given."""
+    exact examples given.
+
+    DEDUPLICATION: Before adding a new rule, check whether an existing rule in
+    `current_prompt` already expresses the same intent. If so, MERGE the new
+    requirement into the existing rule rather than appending a new one. The
+    output should not contain two rules that say the same thing in different
+    words.
+
+    GENERALITY: Express new rules as general principles. Do NOT name specific
+    entities, products, brands, people, numbers, dates, IDs, or quote
+    conversation snippets from `failing_examples`. State the rule at the level
+    of *categories of input*, not specific inputs.
+
+    Concrete contrast:
+      Bad:  "When the user asks about Acme Pro pricing, respond with the
+             current monthly cost."
+      Good: "When asked about product pricing, look up the current pricing
+             source before answering."
+    """
 
     current_prompt: str = dspy.InputField(desc="the existing prompt to improve")
     change_request: str = dspy.InputField(desc="what to add, modify, or fix")
@@ -31,7 +50,7 @@ class IteratePromptSignature(dspy.Signature):
         desc="optional: abstracted patterns describing failures, NOT literal examples to embed"
     )
     improved_prompt: str = dspy.OutputField(
-        desc="the updated prompt incorporating the changes as general rules"
+        desc="the updated prompt incorporating the changes as general rules, with overlapping rules merged rather than appended"
     )
     changes_made: str = dspy.OutputField(desc="summary of what was changed and why")
 
@@ -43,12 +62,14 @@ class IteratePromptPipeline(dspy.Module):
         judge: Optional[PromptQualityJudge] = None,
         store: Optional[PromptStore] = None,
         pattern_extractor: Optional[PatternExtractor] = None,
+        consolidator: Optional[PromptConsolidator] = None,
     ):
         super().__init__()
         self.generate = generate_module or dspy.ChainOfThought(IteratePromptSignature)
         self.judge = judge or PromptQualityJudge()
         self.store = store or PromptStore()
         self.pattern_extractor = pattern_extractor or PatternExtractor()
+        self.consolidator = consolidator or PromptConsolidator()
 
     def forward(
         self,
@@ -174,14 +195,31 @@ class IteratePromptPipeline(dspy.Module):
                     failing_examples=iteration_input,
                 )
 
+                # Post-pass: scrub scenario specifics + merge redundant rules.
+                # The consolidated prompt is what gets validated, judged, and
+                # saved. On failure we fall back to the raw improved_prompt
+                # rather than killing the iteration.
+                try:
+                    consolidated_prompt, consolidation_notes = self.consolidator(
+                        raw_prompt=result.improved_prompt,
+                        change_request=change_request,
+                        abstracted_pattern=abstracted_pattern,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Consolidation failed, using raw improved prompt: {e}"
+                    )
+                    consolidated_prompt = result.improved_prompt
+                    consolidation_notes = ""
+
                 validation = validate_generalization(
-                    improved_prompt=result.improved_prompt,
+                    improved_prompt=consolidated_prompt,
                     failing_examples=iteration_input,
                 )
 
                 if original_failing_examples and abstracted_pattern:
                     original_validation = validate_generalization(
-                        improved_prompt=result.improved_prompt,
+                        improved_prompt=consolidated_prompt,
                         failing_examples=original_failing_examples,
                     )
                     if not original_validation.is_valid:
@@ -199,7 +237,7 @@ class IteratePromptPipeline(dspy.Module):
                                 prompt_fn(
                                     f"Validation failed: {validation.reason}\n"
                                     f"Detected literal content: {validation.detected_literals or []}\n"
-                                    f"Improved prompt:\n{result.improved_prompt}\n\n"
+                                    f"Improved prompt:\n{consolidated_prompt}\n\n"
                                     "Do you want to (a)ccept/(r)etry/(e)xit? "
                                 )
                                 .strip()
@@ -218,12 +256,12 @@ class IteratePromptPipeline(dspy.Module):
                         raise ValueError(
                             f"Validation failed: {validation.reason}\n"
                             f"Detected literal content: {validation.detected_literals or []}\n"
-                            f"Improved prompt:\n{result.improved_prompt}"
+                            f"Improved prompt:\n{consolidated_prompt}"
                         )
 
                 score, feedback = self.judge.evaluate_comparison(
                     original_prompt=current_prompt,
-                    improved_prompt=result.improved_prompt,
+                    improved_prompt=consolidated_prompt,
                     change_request=change_request,
                 )
         except ValueError:
@@ -243,13 +281,14 @@ class IteratePromptPipeline(dspy.Module):
             abstracted_pattern=abstracted_pattern,
             result_changes=result.changes_made,
             validation_result=validation,
+            consolidation_notes=consolidation_notes,
         )
 
         actual_model = model or self._detect_model()
         version = PromptVersion(
             version=None,
             parent_version=parent_version,
-            prompt_text=result.improved_prompt,
+            prompt_text=consolidated_prompt,
             description=description,
             change_request=change_request,
             changes_made=enhanced_changes,
@@ -272,6 +311,7 @@ class IteratePromptPipeline(dspy.Module):
         abstracted_pattern: str,
         result_changes: str,
         validation_result: ValidationResult,
+        consolidation_notes: str = "",
     ) -> str:
         """Build enhanced changes_made string with transparency info."""
         lines = []
@@ -291,6 +331,10 @@ class IteratePromptPipeline(dspy.Module):
 
         lines.append(f"--- Changes Made ---\n{result_changes}")
         lines.append("")
+
+        if consolidation_notes:
+            lines.append(f"--- Consolidation (scrub + merge) ---\n{consolidation_notes}")
+            lines.append("")
 
         lines.append(f"--- Validation ---\n{validation_result.reason}")
 

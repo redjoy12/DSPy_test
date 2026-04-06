@@ -38,6 +38,11 @@ class TestCreateThenIterate:
                 "improved_prompt": "You are a helpful coding assistant. When errors occur, explain them clearly.",
                 "changes_made": "Added error explanation behavior.",
             },
+            {
+                "reasoning": "Already general and non-redundant.",
+                "consolidated_prompt": "You are a helpful coding assistant. When errors occur, explain them clearly.",
+                "consolidation_notes": "No changes needed.",
+            },
             {"reasoning": "Good addition.", "improvement_score": "0.91", "feedback": "Addresses the request."},
         ])
         with dspy.context(lm=iterate_lm):
@@ -74,7 +79,8 @@ class TestCreateThenIterate:
         # Iterate v2, v3, v4
         for i in range(2, 5):
             lm = DummyLM([
-                {"reasoning": f"Change {i}.", "improved_prompt": f"V{i} prompt.", "changes_made": f"Change {i}."},
+                {"reasoning": f"Change {i}.", "improved_prompt": f"V{i} prompt is general.", "changes_made": f"Change {i}."},
+                {"reasoning": "Nothing to merge.", "consolidated_prompt": f"V{i} prompt is general.", "consolidation_notes": "No changes."},
                 {"reasoning": "x.", "improvement_score": "0.9", "feedback": "Improved."},
             ])
             with dspy.context(lm=lm):

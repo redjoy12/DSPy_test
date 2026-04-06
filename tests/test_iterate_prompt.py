@@ -7,6 +7,19 @@ from src.pipelines.create_prompt import CreatePromptPipeline
 from src.store.prompt_store import PromptStore
 
 
+class _PassthroughConsolidator:
+    """Test stub: returns the raw prompt unchanged with empty notes.
+
+    Injected into iterate_and_save tests so the consolidation post-pass
+    doesn't consume DummyLM completions or alter the prompt under test.
+    Tests that specifically verify the consolidation integration use a
+    different stub or the real PromptConsolidator with a primed DummyLM.
+    """
+
+    def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+        return raw_prompt, ""
+
+
 class TestIteratePromptSignature:
     def test_input_fields(self):
         fields = IteratePromptSignature.input_fields
@@ -115,7 +128,9 @@ class TestIterateAndSave:
             ]
         )
         with dspy.context(lm=lm):
-            pipeline = IteratePromptPipeline(store=store)
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_PassthroughConsolidator()
+            )
             v2 = pipeline.iterate_and_save(
                 name="test_prompt", change_request="Add error handling"
             )
@@ -148,7 +163,9 @@ class TestIterateAndSave:
             ]
         )
         with dspy.context(lm=lm):
-            pipeline = IteratePromptPipeline(store=store)
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_PassthroughConsolidator()
+            )
             result = pipeline.iterate_and_save(
                 name="new_prompt",
                 change_request="Improve it",
@@ -180,7 +197,9 @@ class TestIterateAndSave:
                 ]
             )
             with dspy.context(lm=lm):
-                pipeline = IteratePromptPipeline(store=store)
+                pipeline = IteratePromptPipeline(
+                    store=store, consolidator=_PassthroughConsolidator()
+                )
                 pipeline.iterate_and_save(
                     name="test_prompt", change_request=f"Improvement {i}"
                 )
@@ -233,6 +252,7 @@ class TestIterateAndSave:
             pipeline = IteratePromptPipeline(
                 generate_module=_CapturingGenerate(),
                 store=store,
+                consolidator=_PassthroughConsolidator(),
             )
             v2 = pipeline.iterate_and_save(
                 name="test_prompt",
@@ -281,6 +301,7 @@ class TestIterateAndSave:
             pipeline = IteratePromptPipeline(
                 generate_module=_CapturingGenerate(),
                 store=store,
+                consolidator=_PassthroughConsolidator(),
             )
             pipeline.iterate_and_save(
                 name="test_prompt",
@@ -318,7 +339,9 @@ class TestIterateAndSave:
             ]
         )
         with dspy.context(lm=lm):
-            pipeline = IteratePromptPipeline(store=store)
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_PassthroughConsolidator()
+            )
             with pytest.raises(ValueError, match="below minimum threshold"):
                 pipeline.iterate_and_save(
                     name="test_prompt",
@@ -352,6 +375,7 @@ class TestIterateAndSave:
             pipeline = IteratePromptPipeline(
                 store=store,
                 pattern_extractor=FailingPatternExtractor(),
+                consolidator=_PassthroughConsolidator(),
             )
             with pytest.raises(ValueError, match="Validation failed"):
                 pipeline.iterate_and_save(
@@ -388,6 +412,7 @@ class TestIterateAndSave:
                 store=store,
                 generate_module=_CapturingGenerate(),
                 pattern_extractor=FailingPatternExtractor(),
+                consolidator=_PassthroughConsolidator(),
             )
             v2 = pipeline.iterate_and_save(
                 name="test_prompt",
@@ -423,7 +448,9 @@ class TestIterateAndSave:
             return "a"
 
         with dspy.context(lm=lm):
-            pipeline = IteratePromptPipeline(store=store)
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_PassthroughConsolidator()
+            )
             v2 = pipeline.iterate_and_save(
                 name="test_prompt",
                 change_request="Add error handling",
@@ -463,7 +490,9 @@ class TestIterateAndSave:
             return "r"
 
         with dspy.context(lm=lm):
-            pipeline = IteratePromptPipeline(store=store)
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_PassthroughConsolidator()
+            )
             with pytest.raises(ValueError, match="User requested retry"):
                 pipeline.iterate_and_save(
                     name="test_prompt",
@@ -472,6 +501,139 @@ class TestIterateAndSave:
                     interactive=True,
                     prompt_func=mock_input,
                 )
+
+    def test_consolidator_output_is_what_gets_saved(self, store):
+        """The consolidated prompt (not the raw improved_prompt) becomes prompt_text."""
+        self._create_v1(store)
+
+        class _RewritingConsolidator:
+            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+                return ("CONSOLIDATED VERSION", "merged 2 rules; scrubbed 1 specific name")
+
+        lm = DummyLM(
+            [
+                {
+                    "reasoning": "Iterating.",
+                    "improved_prompt": "RAW LLM OUTPUT mentioning Acme Pro",
+                    "changes_made": "Added a rule.",
+                },
+                {
+                    "reasoning": "OK.",
+                    "improvement_score": "0.9",
+                    "feedback": "Good.",
+                },
+            ]
+        )
+        with dspy.context(lm=lm):
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_RewritingConsolidator()
+            )
+            v2 = pipeline.iterate_and_save(
+                name="test_prompt", change_request="Add a rule"
+            )
+
+        assert v2.prompt_text == "CONSOLIDATED VERSION"
+        assert "Acme Pro" not in v2.prompt_text
+        # Consolidation notes flow into changes_made for transparency.
+        assert "Consolidation" in v2.changes_made
+        assert "merged 2 rules" in v2.changes_made
+
+        # Verify the persisted version on disk reflects the consolidated text too.
+        loaded = store.load("test_prompt", 2)
+        assert loaded.prompt_text == "CONSOLIDATED VERSION"
+
+    def test_consolidator_failure_falls_back_to_raw_prompt(self, store, caplog):
+        """When the consolidator raises, the raw improved_prompt is saved and a warning is logged."""
+        import logging
+
+        self._create_v1(store)
+
+        class _ExplodingConsolidator:
+            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+                raise RuntimeError("consolidator boom")
+
+        lm = DummyLM(
+            [
+                {
+                    "reasoning": "Iterating.",
+                    "improved_prompt": "Raw improved prompt about general behaviors.",
+                    "changes_made": "Added rules.",
+                },
+                {
+                    "reasoning": "OK.",
+                    "improvement_score": "0.9",
+                    "feedback": "Good.",
+                },
+            ]
+        )
+        with dspy.context(lm=lm), caplog.at_level(logging.WARNING):
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_ExplodingConsolidator()
+            )
+            v2 = pipeline.iterate_and_save(
+                name="test_prompt", change_request="Improve"
+            )
+
+        assert v2.prompt_text == "Raw improved prompt about general behaviors."
+        assert any("Consolidation failed" in r.message for r in caplog.records)
+        # No consolidation section in changes_made when notes are empty.
+        assert "Consolidation (scrub + merge)" not in v2.changes_made
+
+    def test_consolidator_runs_after_iterate_with_correct_inputs(self, store):
+        """The consolidator receives the iterate output, change_request, and abstracted pattern."""
+        self._create_v1(store)
+
+        captured: dict = {}
+
+        class _CapturingConsolidator:
+            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+                captured["raw_prompt"] = raw_prompt
+                captured["change_request"] = change_request
+                captured["abstracted_pattern"] = abstracted_pattern
+                return ("a clean consolidated prompt", "merged notes")
+
+        structured = [
+            {
+                "messages": [{"role": "human", "content": "what?"}],
+                "unsatisfactory_output": "I don't know",
+            }
+        ]
+
+        lm = DummyLM(
+            [
+                {
+                    "reasoning": "Extracting.",
+                    "issue": "Bot lacks context",
+                    "pattern": "User asks unanswered questions",
+                    "root_cause": "Missing fallback rule",
+                },
+                {
+                    "reasoning": "Iterating.",
+                    "improved_prompt": "RAW iterate output",
+                    "changes_made": "Added fallback.",
+                },
+                {
+                    "reasoning": "OK.",
+                    "improvement_score": "0.9",
+                    "feedback": "Good.",
+                },
+            ]
+        )
+        with dspy.context(lm=lm):
+            pipeline = IteratePromptPipeline(
+                store=store, consolidator=_CapturingConsolidator()
+            )
+            pipeline.iterate_and_save(
+                name="test_prompt",
+                change_request="Handle unanswerable questions",
+                structured_examples=structured,
+            )
+
+        assert captured["raw_prompt"] == "RAW iterate output"
+        assert captured["change_request"] == "Handle unanswerable questions"
+        assert "Issue:" in captured["abstracted_pattern"]
+        assert "Pattern:" in captured["abstracted_pattern"]
+        assert "Root cause:" in captured["abstracted_pattern"]
 
     def test_detect_model_no_lm_configured(self):
         """_detect_model returns 'unknown' when no LM is configured."""
