@@ -223,18 +223,20 @@ class TestStructuredExamples:
         prompt_dir.mkdir()
         # Write a legacy JSON file without the structured_examples key.
         (prompt_dir / "v1.json").write_text(
-            json.dumps({
-                "version": 1,
-                "parent_version": None,
-                "prompt_text": "Old prompt",
-                "description": "legacy",
-                "change_request": None,
-                "changes_made": None,
-                "quality_score": 0.7,
-                "judge_feedback": "old",
-                "timestamp": "2026-01-01T00:00:00Z",
-                "metadata": {"pipeline": "create", "model": "m"},
-            }),
+            json.dumps(
+                {
+                    "version": 1,
+                    "parent_version": None,
+                    "prompt_text": "Old prompt",
+                    "description": "legacy",
+                    "change_request": None,
+                    "changes_made": None,
+                    "quality_score": 0.7,
+                    "judge_feedback": "old",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "metadata": {"pipeline": "create", "model": "m"},
+                }
+            ),
             encoding="utf-8",
         )
         loaded = store.load("legacy", version=1)
@@ -270,3 +272,44 @@ class TestStructuredExamples:
         assert "Unsatisfactory Output: bad" in text
         assert "--- Example 2 ---" in text
         assert "Human: only human" in text
+
+
+class TestValidateName:
+    def test_valid_names(self):
+        valid_names = ["my-prompt", "my_prompt", "my.prompt", "my prompt", "prompt123"]
+        for name in valid_names:
+            PromptStore.validate_name(name)
+
+    def test_rejects_path_traversal(self):
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("../etc/passwd")
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("..\\etc\\passwd")
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("foo/../bar")
+
+    def test_rejects_invalid_characters(self):
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("prompt$name")
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("prompt/name")
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("prompt\\name")
+
+    def test_rejects_empty_name(self):
+        with pytest.raises(ValueError, match="letters, digits"):
+            PromptStore.validate_name("")
+
+    def test_rejects_whitespace_only(self):
+        with pytest.raises(ValueError, match="cannot consist only of dots and spaces"):
+            PromptStore.validate_name("   ")
+        with pytest.raises(ValueError, match="cannot consist only of dots and spaces"):
+            PromptStore.validate_name("...")
+        with pytest.raises(ValueError, match="cannot consist only of dots and spaces"):
+            PromptStore.validate_name(". . .")
+
+    def test_rejects_only_dots_and_spaces(self):
+        with pytest.raises(ValueError, match="cannot consist only of dots and spaces"):
+            PromptStore.validate_name(".. ")
+        with pytest.raises(ValueError, match="cannot consist only of dots and spaces"):
+            PromptStore.validate_name(" . ")

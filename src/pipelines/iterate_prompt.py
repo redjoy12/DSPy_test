@@ -1,20 +1,35 @@
+import logging
+from contextlib import nullcontext
+
 import dspy
 
 from src.evaluation.judge import PromptQualityJudge
+from src.pipelines.abstract_pattern import PatternExtractor, format_abstracted_patterns
 from src.store.prompt_store import PromptStore, PromptVersion
+from src.validation.generality_validator import (
+    validate_generalization,
+    ValidationResult,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class IteratePromptSignature(dspy.Signature):
     """Improve an existing prompt based on a change request and optional failing examples.
-    Preserve what works well in the original prompt while addressing the requested changes."""
+    Preserve what works well in the original prompt while addressing the requested changes.
+
+    IMPORTANT: When failing examples are provided, focus on fixing the GENERAL PRINCIPLE
+    or ROOT CAUSE of the failure, NOT on adding the specific scenario verbatim.
+    The improved prompt should work for any case matching the pattern, not just the
+    exact examples given."""
 
     current_prompt: str = dspy.InputField(desc="the existing prompt to improve")
     change_request: str = dspy.InputField(desc="what to add, modify, or fix")
     failing_examples: str = dspy.InputField(
-        desc="optional: input/output pairs where the current prompt fails"
+        desc="optional: abstracted patterns describing failures, NOT literal examples to embed"
     )
     improved_prompt: str = dspy.OutputField(
-        desc="the updated prompt incorporating the changes"
+        desc="the updated prompt incorporating the changes as general rules"
     )
     changes_made: str = dspy.OutputField(desc="summary of what was changed and why")
 
@@ -25,11 +40,13 @@ class IteratePromptPipeline(dspy.Module):
         generate_module=None,
         judge: PromptQualityJudge | None = None,
         store: PromptStore | None = None,
+        pattern_extractor: PatternExtractor | None = None,
     ):
         super().__init__()
         self.generate = generate_module or dspy.ChainOfThought(IteratePromptSignature)
         self.judge = judge or PromptQualityJudge()
         self.store = store or PromptStore()
+        self.pattern_extractor = pattern_extractor or PatternExtractor()
 
     def forward(
         self,
@@ -53,6 +70,8 @@ class IteratePromptPipeline(dspy.Module):
         structured_examples: list[dict] | None = None,
         model: str | None = None,
         min_score: float | None = None,
+        interactive: bool = False,
+        prompt_func: callable | None = None,
     ) -> PromptVersion:
         """Improve an existing prompt, evaluate the result, and save a new version.
 
@@ -86,12 +105,19 @@ class IteratePromptPipeline(dspy.Module):
             min_score: Optional minimum quality score threshold. If provided and
                 the iterated prompt scores below this value, a ``ValueError``
                 is raised and the prompt is **not** saved.
+            interactive: If ``True``, prompt user when validation fails for
+                (a)ccept/(r)etry/(e)xit choice. If ``False`` (default), raise
+                ``ValueError`` immediately on validation failure.
+            prompt_func: Optional callable for user prompts in interactive mode.
+                Defaults to built-in ``input()``. Useful for testing or
+                non-interactive environments.
 
         Returns:
             The newly created ``PromptVersion``.
 
         Raises:
-            ValueError: If *min_score* is set and the prompt scores below it.
+            ValueError: If *min_score* is set and the prompt scores below it,
+                or if validation fails and the user rejects the prompt.
         """
         if current_prompt is None:
             latest = self.store.load_latest(name)
@@ -103,8 +129,8 @@ class IteratePromptPipeline(dspy.Module):
             parent_version = max(existing) if existing else None
             description = description or ""
 
-        # Merge structured examples into the failing_examples text input, so
-        # the DSPy signature sees a single unified string.
+        original_failing_examples = failing_examples
+
         if structured_examples:
             structured_text = PromptVersion.format_examples_as_text(structured_examples)
             if failing_examples and structured_text:
@@ -116,22 +142,92 @@ class IteratePromptPipeline(dspy.Module):
             lm = dspy.LM(model)
             ctx = dspy.context(lm=lm)
         else:
-            from contextlib import nullcontext
-
             ctx = nullcontext()
 
-        with ctx:
-            result = self(
-                current_prompt=current_prompt,
-                change_request=change_request,
-                failing_examples=failing_examples,
-            )
+        try:
+            with ctx:
+                abstracted_pattern = ""
+                pattern_extraction_failed = False
+                if failing_examples:
+                    try:
+                        issue, pattern, root_cause = self.pattern_extractor(
+                            failing_examples=failing_examples,
+                            change_request=change_request,
+                        )
+                        abstracted_pattern = format_abstracted_patterns(
+                            issue, pattern, root_cause
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Pattern extraction failed, falling back to raw examples: {e}"
+                        )
+                        pattern_extraction_failed = True
 
-            score, feedback = self.judge.evaluate_comparison(
-                original_prompt=current_prompt,
-                improved_prompt=result.improved_prompt,
-                change_request=change_request,
-            )
+                iteration_input = (
+                    abstracted_pattern if abstracted_pattern else failing_examples
+                )
+                result = self(
+                    current_prompt=current_prompt,
+                    change_request=change_request,
+                    failing_examples=iteration_input,
+                )
+
+                validation = validate_generalization(
+                    improved_prompt=result.improved_prompt,
+                    failing_examples=iteration_input,
+                )
+
+                if original_failing_examples and abstracted_pattern:
+                    original_validation = validate_generalization(
+                        improved_prompt=result.improved_prompt,
+                        failing_examples=original_failing_examples,
+                    )
+                    if not original_validation.is_valid:
+                        validation = original_validation
+                    elif not validation.is_valid:
+                        pass
+
+                validation_passed = validation.is_valid
+
+                if not validation_passed:
+                    if interactive:
+                        prompt_fn = prompt_func or input
+                        while True:
+                            response = (
+                                prompt_fn(
+                                    f"Validation failed: {validation.reason}\n"
+                                    f"Detected literal content: {validation.detected_literals or []}\n"
+                                    f"Improved prompt:\n{result.improved_prompt}\n\n"
+                                    "Do you want to (a)ccept/(r)etry/(e)xit? "
+                                )
+                                .strip()
+                                .lower()
+                            )
+                            if response in ("a", "accept"):
+                                validation_passed = True
+                                break
+                            elif response in ("r", "retry"):
+                                raise ValueError(
+                                    "User requested retry after validation failure"
+                                )
+                            elif response in ("e", "exit"):
+                                raise ValueError("Aborted by user")
+                    else:
+                        raise ValueError(
+                            f"Validation failed: {validation.reason}\n"
+                            f"Detected literal content: {validation.detected_literals or []}\n"
+                            f"Improved prompt:\n{result.improved_prompt}"
+                        )
+
+                score, feedback = self.judge.evaluate_comparison(
+                    original_prompt=current_prompt,
+                    improved_prompt=result.improved_prompt,
+                    change_request=change_request,
+                )
+        except ValueError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Prompt iteration failed: {e}") from e
 
         if min_score is not None and score < min_score:
             raise ValueError(
@@ -139,23 +235,69 @@ class IteratePromptPipeline(dspy.Module):
                 f"Feedback: {feedback}"
             )
 
-        # Record the actual model used in metadata.
-        actual_model = model or getattr(
-            getattr(dspy.settings, "lm", None), "model", "unknown"
+        enhanced_changes = self._build_changes_made(
+            original_examples=original_failing_examples,
+            structured_examples=structured_examples,
+            abstracted_pattern=abstracted_pattern,
+            result_changes=result.changes_made,
+            validation_result=validation,
         )
-        version_num = self.store.get_next_version(name)
+
+        actual_model = model or self._detect_model()
         version = PromptVersion(
-            version=version_num,
+            version=None,
             parent_version=parent_version,
             prompt_text=result.improved_prompt,
             description=description,
             change_request=change_request,
-            changes_made=result.changes_made,
+            changes_made=enhanced_changes,
             structured_examples=structured_examples,
+            abstracted_patterns=abstracted_pattern,
+            validation_passed=validation_passed,
             quality_score=score,
             judge_feedback=feedback,
             pipeline="iterate",
             model=actual_model,
         )
-        self.store.save(name, version)
+        version_num, _ = self.store.get_and_save_version(name, version)
+        version.version = version_num
         return version
+
+    def _build_changes_made(
+        self,
+        original_examples: str,
+        structured_examples: list[dict] | None,
+        abstracted_pattern: str,
+        result_changes: str,
+        validation_result: ValidationResult,
+    ) -> str:
+        """Build enhanced changes_made string with transparency info."""
+        lines = []
+
+        if original_examples or structured_examples:
+            lines.append("--- Original Failing Examples ---")
+            if original_examples:
+                lines.append(original_examples)
+            if structured_examples:
+                lines.append(PromptVersion.format_examples_as_text(structured_examples))
+            lines.append("")
+
+        if abstracted_pattern:
+            lines.append("--- Abstracted Pattern (derived from examples) ---")
+            lines.append(abstracted_pattern)
+            lines.append("")
+
+        lines.append(f"--- Changes Made ---\n{result_changes}")
+        lines.append("")
+
+        lines.append(f"--- Validation ---\n{validation_result.reason}")
+
+        return "\n".join(lines)
+
+    def _detect_model(self) -> str:
+        """Detect the currently configured model from DSPy settings."""
+        lm = getattr(dspy.settings, "lm", None)
+        if lm is None:
+            return "unknown"
+        model = getattr(lm, "model", None)
+        return model if model else "unknown"
