@@ -164,3 +164,109 @@ class TestPromptStore:
     def test_load_nonexistent_prompt_raises(self, store):
         with pytest.raises(FileNotFoundError):
             store.load("nonexistent", version=1)
+
+
+class TestStructuredExamples:
+    """Tests for the multi-turn failing examples support on PromptVersion."""
+
+    def _sample_examples(self) -> list[dict]:
+        return [
+            {
+                "messages": [
+                    {"role": "human", "content": "What products do you have?"},
+                    {"role": "assistant", "content": "We have X, Y, Z"},
+                    {"role": "human", "content": "Tell me more about X"},
+                ],
+                "unsatisfactory_output": "I don't know about X",
+            },
+            {
+                "messages": [
+                    {"role": "human", "content": "Hello"},
+                ],
+                "unsatisfactory_output": "Error: out of context",
+            },
+        ]
+
+    def test_default_structured_examples_is_none(self):
+        pv = PromptVersion(
+            version=1,
+            parent_version=None,
+            prompt_text="p",
+            description="d",
+            quality_score=0.8,
+            judge_feedback="ok",
+            pipeline="create",
+            model="m",
+        )
+        assert pv.structured_examples is None
+
+    def test_structured_examples_roundtrip(self, store):
+        examples = self._sample_examples()
+        pv = PromptVersion(
+            version=1,
+            parent_version=None,
+            prompt_text="Hello",
+            description="test",
+            quality_score=0.9,
+            judge_feedback="ok",
+            pipeline="iterate",
+            model="m",
+            structured_examples=examples,
+        )
+        store.save("struct_prompt", pv)
+        loaded = store.load("struct_prompt", version=1)
+        assert loaded.structured_examples == examples
+
+    def test_structured_examples_absent_in_old_json_is_none(self, tmp_path, store):
+        """Old JSON files without the key should deserialize with None."""
+        prompt_dir = tmp_path / "legacy"
+        prompt_dir.mkdir()
+        # Write a legacy JSON file without the structured_examples key.
+        (prompt_dir / "v1.json").write_text(
+            json.dumps({
+                "version": 1,
+                "parent_version": None,
+                "prompt_text": "Old prompt",
+                "description": "legacy",
+                "change_request": None,
+                "changes_made": None,
+                "quality_score": 0.7,
+                "judge_feedback": "old",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "metadata": {"pipeline": "create", "model": "m"},
+            }),
+            encoding="utf-8",
+        )
+        loaded = store.load("legacy", version=1)
+        assert loaded.structured_examples is None
+
+    def test_format_examples_as_text_empty(self):
+        assert PromptVersion.format_examples_as_text(None) == ""
+        assert PromptVersion.format_examples_as_text([]) == ""
+
+    def test_format_examples_as_text_renders_conversation(self):
+        examples = self._sample_examples()
+        text = PromptVersion.format_examples_as_text(examples)
+
+        # Must contain headers for both examples
+        assert "--- Example 1 ---" in text
+        assert "--- Example 2 ---" in text
+        # Capitalized role labels
+        assert "Human: What products do you have?" in text
+        assert "Assistant: We have X, Y, Z" in text
+        assert "Human: Tell me more about X" in text
+        # Unsatisfactory output line
+        assert "Unsatisfactory Output: I don't know about X" in text
+        assert "Unsatisfactory Output: Error: out of context" in text
+
+    def test_format_examples_as_text_handles_missing_fields(self):
+        """Examples without messages or unsatisfactory output still produce a block."""
+        examples = [
+            {"messages": [], "unsatisfactory_output": "bad"},
+            {"messages": [{"role": "human", "content": "only human"}]},
+        ]
+        text = PromptVersion.format_examples_as_text(examples)
+        assert "--- Example 1 ---" in text
+        assert "Unsatisfactory Output: bad" in text
+        assert "--- Example 2 ---" in text
+        assert "Human: only human" in text

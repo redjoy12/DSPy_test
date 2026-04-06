@@ -138,3 +138,77 @@ class TestExampleBasedMetric:
             metric = ExampleBasedMetric()
             with pytest.raises(RuntimeError, match="All 1 example evaluations failed"):
                 metric.evaluate("Test prompt", examples)
+
+
+class TestExampleBasedMetricMultiTurn:
+    def test_empty_structured_examples_returns_zero(self):
+        metric = ExampleBasedMetric()
+        assert metric.evaluate_multi_turn("Some prompt", []) == 0.0
+
+    def test_improved_prompt_avoiding_bad_output_scores_high(self):
+        """If the new output doesn't match the unsatisfactory output at all,
+        the inverted overlap score is 1.0."""
+        lm = DummyLM([{"output": "Here is a helpful reply"}])
+        examples = [
+            {
+                "messages": [
+                    {"role": "human", "content": "What products?"},
+                    {"role": "assistant", "content": "X, Y, Z"},
+                    {"role": "human", "content": "Tell me about X"},
+                ],
+                "unsatisfactory_output": "apples oranges bananas",
+            }
+        ]
+        with dspy.context(lm=lm):
+            metric = ExampleBasedMetric()
+            score = metric.evaluate_multi_turn("Better prompt", examples)
+        assert score == 1.0
+
+    def test_improved_prompt_reproducing_bad_output_scores_zero(self):
+        """If the new output exactly matches the bad output, score is 0.0."""
+        lm = DummyLM([{"output": "I don't know"}])
+        examples = [
+            {
+                "messages": [{"role": "human", "content": "Tell me about X"}],
+                "unsatisfactory_output": "I don't know",
+            }
+        ]
+        with dspy.context(lm=lm):
+            metric = ExampleBasedMetric()
+            score = metric.evaluate_multi_turn("Bad prompt", examples)
+        assert score == 0.0
+
+    def test_split_conversation_last_human_becomes_current_input(self):
+        messages = [
+            {"role": "human", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+            {"role": "human", "content": "How are you?"},
+        ]
+        history, current = ExampleBasedMetric._split_conversation(messages)
+        assert current == "How are you?"
+        assert "Human: Hi" in history
+        assert "Assistant: Hello" in history
+        assert "How are you?" not in history
+
+    def test_split_conversation_without_trailing_human(self):
+        messages = [
+            {"role": "human", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        history, current = ExampleBasedMetric._split_conversation(messages)
+        assert current == ""
+        assert "Human: Hi" in history
+        assert "Assistant: Hello" in history
+
+    def test_all_multi_turn_predictions_fail_raises_runtime_error(self):
+        lm = DummyLM([])
+        examples = [
+            {
+                "messages": [{"role": "human", "content": "hi"}],
+                "unsatisfactory_output": "bad",
+            }
+        ]
+        with dspy.context(lm=lm):
+            metric = ExampleBasedMetric()
+            with pytest.raises(RuntimeError, match="All 1 multi-turn evaluations failed"):
+                metric.evaluate_multi_turn("p", examples)

@@ -47,6 +47,7 @@ class IteratePromptPipeline(dspy.Module):
         current_prompt: str | None = None,
         description: str | None = None,
         failing_examples: str = "",
+        structured_examples: list[dict] | None = None,
         model: str | None = None,
         min_score: float | None = None,
     ) -> PromptVersion:
@@ -64,7 +65,18 @@ class IteratePromptPipeline(dspy.Module):
                 Defaults to the description from the previous version when
                 *current_prompt* is loaded from the store.
             failing_examples: Optional input/output pairs where the current
-                prompt fails, used to guide improvements.
+                prompt fails, used to guide improvements. When
+                *structured_examples* is also provided, the serialized
+                structured examples are appended to this string so both
+                formats can be supplied simultaneously.
+            structured_examples: Optional list of multi-turn conversation
+                examples that the current system prompt handles poorly. Each
+                example is a dict with ``messages`` (list of
+                ``{"role": "human"|"assistant", "content": ...}``) and an
+                ``unsatisfactory_output`` string. The structured examples are
+                serialized into the ``failing_examples`` string input for the
+                DSPy signature and stored verbatim on the new version for
+                later reference.
             model: The LLM to use for generation and judging.  When provided,
                 a ``dspy.LM`` is created and used for this call.  When
                 ``None`` (the default), the globally configured LM is used.
@@ -87,6 +99,15 @@ class IteratePromptPipeline(dspy.Module):
             existing = self.store.list_versions(name)
             parent_version = max(existing) if existing else None
             description = description or ""
+
+        # Merge structured examples into the failing_examples text input, so
+        # the DSPy signature sees a single unified string.
+        if structured_examples:
+            structured_text = PromptVersion.format_examples_as_text(structured_examples)
+            if failing_examples and structured_text:
+                failing_examples = f"{failing_examples}\n{structured_text}"
+            else:
+                failing_examples = structured_text or failing_examples
 
         if model is not None:
             lm = dspy.LM(model)
@@ -124,6 +145,7 @@ class IteratePromptPipeline(dspy.Module):
             description=description,
             change_request=change_request,
             changes_made=result.changes_made,
+            structured_examples=structured_examples,
             quality_score=score,
             judge_feedback=feedback,
             pipeline="iterate",

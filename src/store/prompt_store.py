@@ -18,6 +18,7 @@ class PromptVersion:
     model: str
     change_request: Optional[str] = None
     changes_made: Optional[str] = None
+    structured_examples: Optional[list[dict]] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:
@@ -28,6 +29,7 @@ class PromptVersion:
             "description": self.description,
             "change_request": self.change_request,
             "changes_made": self.changes_made,
+            "structured_examples": self.structured_examples,
             "quality_score": self.quality_score,
             "judge_feedback": self.judge_feedback,
             "timestamp": self.timestamp,
@@ -47,12 +49,56 @@ class PromptVersion:
             description=data.get("description", ""),
             change_request=data.get("change_request"),
             changes_made=data.get("changes_made"),
+            structured_examples=data.get("structured_examples"),
             quality_score=data.get("quality_score", 0.0),
             judge_feedback=data.get("judge_feedback", ""),
             pipeline=metadata.get("pipeline", "unknown"),
             model=metadata.get("model", "unknown"),
             timestamp=data.get("timestamp", ""),
         )
+
+    @staticmethod
+    def format_examples_as_text(examples: Optional[list[dict]]) -> str:
+        """Serialize structured failing examples into a readable text block.
+
+        Each example is a dict of the form::
+
+            {
+                "messages": [
+                    {"role": "human", "content": "..."},
+                    {"role": "assistant", "content": "..."},
+                    ...
+                ],
+                "unsatisfactory_output": "the final bad output from the assistant",
+            }
+
+        The returned string is meant to be fed into the ``failing_examples``
+        string input field of :class:`IteratePromptSignature` so the LLM can
+        read the conversation context and understand where the current system
+        prompt is producing bad results.
+        """
+        if not examples:
+            return ""
+
+        blocks: list[str] = []
+        for i, example in enumerate(examples, start=1):
+            lines = [f"--- Example {i} ---"]
+            for msg in example.get("messages", []) or []:
+                role = str(msg.get("role", "")).strip().lower()
+                content = str(msg.get("content", "")).strip()
+                if role == "human":
+                    label = "Human"
+                elif role == "assistant":
+                    label = "Assistant"
+                else:
+                    label = role.capitalize() or "Unknown"
+                lines.append(f"{label}: {content}")
+            unsatisfactory = str(example.get("unsatisfactory_output", "")).strip()
+            if unsatisfactory:
+                lines.append(f"Unsatisfactory Output: {unsatisfactory}")
+            lines.append("---")
+            blocks.append("\n".join(lines))
+        return "\n".join(blocks)
 
 
 class PromptStore:

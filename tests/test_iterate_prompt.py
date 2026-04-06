@@ -150,6 +150,97 @@ class TestIterateAndSave:
         assert latest.version == 4
         assert latest.parent_version == 3
 
+    def test_iterates_with_structured_examples(self, store):
+        """Structured examples should be serialized into failing_examples and
+        stored verbatim on the new version."""
+        self._create_v1(store)
+
+        captured: dict = {}
+
+        class _CapturingGenerate:
+            def __call__(self, **kwargs):
+                captured.update(kwargs)
+                return dspy.Prediction(
+                    improved_prompt="Improved with multi-turn insight.",
+                    changes_made="Addressed the multi-turn failure.",
+                )
+
+        structured = [
+            {
+                "messages": [
+                    {"role": "human", "content": "What products?"},
+                    {"role": "assistant", "content": "X, Y, Z"},
+                    {"role": "human", "content": "Tell me about X"},
+                ],
+                "unsatisfactory_output": "I don't know",
+            }
+        ]
+
+        lm = DummyLM([
+            {"reasoning": "Good.", "improvement_score": "0.9", "feedback": "Nice."},
+        ])
+        with dspy.context(lm=lm):
+            pipeline = IteratePromptPipeline(
+                generate_module=_CapturingGenerate(),
+                store=store,
+            )
+            v2 = pipeline.iterate_and_save(
+                name="test_prompt",
+                change_request="Handle multi-turn product questions",
+                structured_examples=structured,
+            )
+
+        # Structured examples were serialized into failing_examples text.
+        assert "--- Example 1 ---" in captured["failing_examples"]
+        assert "Human: What products?" in captured["failing_examples"]
+        assert "Unsatisfactory Output: I don't know" in captured["failing_examples"]
+
+        # Structured examples are stored verbatim on the new version.
+        assert v2.structured_examples == structured
+        # And persisted to disk.
+        loaded = store.load("test_prompt", 2)
+        assert loaded.structured_examples == structured
+
+    def test_structured_examples_combine_with_failing_examples_text(self, store):
+        """Passing both a failing_examples string and structured examples
+        concatenates them for the signature."""
+        self._create_v1(store)
+
+        captured: dict = {}
+
+        class _CapturingGenerate:
+            def __call__(self, **kwargs):
+                captured.update(kwargs)
+                return dspy.Prediction(
+                    improved_prompt="Improved.",
+                    changes_made="Merged inputs.",
+                )
+
+        lm = DummyLM([
+            {"reasoning": "Good.", "improvement_score": "0.9", "feedback": "Fine."},
+        ])
+        with dspy.context(lm=lm):
+            pipeline = IteratePromptPipeline(
+                generate_module=_CapturingGenerate(),
+                store=store,
+            )
+            pipeline.iterate_and_save(
+                name="test_prompt",
+                change_request="Improve",
+                failing_examples="Input: foo -> Expected: bar",
+                structured_examples=[
+                    {
+                        "messages": [{"role": "human", "content": "hi"}],
+                        "unsatisfactory_output": "oops",
+                    }
+                ],
+            )
+
+        text = captured["failing_examples"]
+        assert "Input: foo -> Expected: bar" in text
+        assert "--- Example 1 ---" in text
+        assert "Human: hi" in text
+
     def test_iterate_and_save_rejects_low_quality_with_min_score(self, store):
         """When min_score is set and the iteration scores below it, ValueError is raised."""
         self._create_v1(store)

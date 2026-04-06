@@ -233,6 +233,10 @@ def render_browse_tab():
     if ver.changes_made:
         st.markdown(f"**Changes made:** {ver.changes_made}")
 
+    if ver.structured_examples:
+        st.markdown("**Failing examples used**")
+        _render_structured_examples_readonly(ver.structured_examples)
+
     # --- Side-by-side comparison ---
     if len(versions) >= 2:
         st.divider()
@@ -329,6 +333,125 @@ def render_create_tab():
 # Tab 2: Iterate Prompt
 # ---------------------------------------------------------------------------
 
+def _render_structured_examples_editor(prompt_name: str) -> list[dict]:
+    """Render the structured failing-examples editor outside the iterate form.
+
+    Returns the current list of example dicts (each with ``messages`` and
+    ``unsatisfactory_output``). State is stored per-prompt so switching
+    prompts does not wipe in-progress examples.
+    """
+    state_key = f"iterate_examples_{prompt_name}"
+    examples: list[dict] = st.session_state.setdefault(state_key, [])
+
+    st.markdown("**Failing Examples** (optional)")
+    st.caption(
+        "Add multi-turn conversations where the current system prompt produces "
+        "unsatisfactory output. DSPy will use these to understand the failure "
+        "modes while improving the prompt."
+    )
+
+    delete_example_idx: int | None = None
+    for ex_idx, example in enumerate(examples):
+        with st.expander(f"Example {ex_idx + 1}", expanded=True):
+            messages: list[dict] = example.setdefault("messages", [])
+
+            delete_msg_idx: int | None = None
+            for msg_idx, msg in enumerate(messages):
+                role = msg.get("role", "human")
+                badge = "HUMAN" if role == "human" else "ASSISTANT"
+                cols = st.columns([1, 8, 1])
+                with cols[0]:
+                    st.markdown(f"`{badge}`")
+                with cols[1]:
+                    msg["content"] = st.text_area(
+                        label=f"{badge} message {msg_idx + 1}",
+                        value=msg.get("content", ""),
+                        key=f"{state_key}_ex{ex_idx}_msg{msg_idx}",
+                        height=80,
+                        label_visibility="collapsed",
+                    )
+                with cols[2]:
+                    if st.button(
+                        "Delete",
+                        key=f"{state_key}_ex{ex_idx}_msg{msg_idx}_del",
+                        help="Remove this message",
+                    ):
+                        delete_msg_idx = msg_idx
+
+            if delete_msg_idx is not None:
+                messages.pop(delete_msg_idx)
+                st.rerun()
+
+            btn_cols = st.columns(2)
+            with btn_cols[0]:
+                if st.button(
+                    "Add Human Message",
+                    key=f"{state_key}_ex{ex_idx}_add_human",
+                ):
+                    messages.append({"role": "human", "content": ""})
+                    st.rerun()
+            with btn_cols[1]:
+                if st.button(
+                    "Add Assistant Message",
+                    key=f"{state_key}_ex{ex_idx}_add_assistant",
+                ):
+                    messages.append({"role": "assistant", "content": ""})
+                    st.rerun()
+
+            example["unsatisfactory_output"] = st.text_area(
+                "Unsatisfactory Output",
+                value=example.get("unsatisfactory_output", ""),
+                key=f"{state_key}_ex{ex_idx}_unsat",
+                height=80,
+                help="The final bad output the current prompt produced.",
+            )
+
+            if st.button("Delete Example", key=f"{state_key}_ex{ex_idx}_del_ex"):
+                delete_example_idx = ex_idx
+
+    if delete_example_idx is not None:
+        examples.pop(delete_example_idx)
+        st.rerun()
+
+    if st.button("Add Example", key=f"{state_key}_add_example"):
+        examples.append({"messages": [], "unsatisfactory_output": ""})
+        st.rerun()
+
+    return examples
+
+
+def _sanitize_structured_examples(examples: list[dict]) -> list[dict]:
+    """Drop empty messages and examples with no meaningful content."""
+    cleaned: list[dict] = []
+    for ex in examples:
+        messages = [
+            {"role": m.get("role", "human"), "content": (m.get("content") or "").strip()}
+            for m in ex.get("messages", [])
+            if (m.get("content") or "").strip()
+        ]
+        unsat = (ex.get("unsatisfactory_output") or "").strip()
+        if messages or unsat:
+            cleaned.append(
+                {"messages": messages, "unsatisfactory_output": unsat}
+            )
+    return cleaned
+
+
+def _render_structured_examples_readonly(examples: list[dict]):
+    """Render stored structured examples as read-only blocks."""
+    for i, ex in enumerate(examples, start=1):
+        with st.expander(f"Example {i}", expanded=False):
+            for msg in ex.get("messages", []) or []:
+                role = str(msg.get("role", "")).strip().lower()
+                badge = "HUMAN" if role == "human" else "ASSISTANT" if role == "assistant" else role.upper()
+                st.markdown(f"`{badge}`")
+                st.markdown(f"> {msg.get('content', '')}")
+            unsat = ex.get("unsatisfactory_output") or ""
+            if unsat:
+                st.markdown("**Unsatisfactory Output**")
+                st.markdown(f"> {unsat}")
+
+
 def render_iterate_tab():
     if not require_api_key():
         return
@@ -362,13 +485,12 @@ def render_iterate_tab():
         st.warning("Could not load latest version.")
         return
 
+    # The structured failing-examples editor must live OUTSIDE the form because
+    # Streamlit forms can't handle dynamic add/delete buttons mid-submit.
+    structured_examples = _render_structured_examples_editor(selected_name)
+
     with st.form("iterate_form"):
         change_request = st.text_area("Change request", help="What to add, modify, or fix.", max_chars=5000)
-        failing_examples = st.text_area(
-            "Failing examples (optional)",
-            help="Input/output pairs where the current prompt fails.",
-            max_chars=10000,
-        )
         model = st.selectbox("Model", models, key="iterate_model")
         min_score = st.slider(
             "Minimum improvement score", 0.0, 1.0, 0.0, 0.05,
@@ -385,6 +507,8 @@ def render_iterate_tab():
             ensure_lm_configured(model)
             from src.pipelines.iterate_prompt import IteratePromptPipeline
 
+            cleaned_examples = _sanitize_structured_examples(structured_examples)
+
             pipeline = IteratePromptPipeline(store=store)
             with st.spinner("Iterating prompt..."):
                 version = pipeline.iterate_and_save(
@@ -392,7 +516,7 @@ def render_iterate_tab():
                     change_request=change_request,
                     current_prompt=before_text,
                     description=latest.description,
-                    failing_examples=failing_examples,
+                    structured_examples=cleaned_examples or None,
                     min_score=min_score if min_score > 0 else None,
                 )
 
@@ -405,6 +529,7 @@ def render_iterate_tab():
                 "quality_score": version.quality_score,
                 "changes_made": version.changes_made,
                 "judge_feedback": version.judge_feedback,
+                "structured_examples": version.structured_examples or [],
             }
 
         except ValueError as exc:
@@ -430,6 +555,12 @@ def render_iterate_tab():
         if result["changes_made"]:
             st.markdown(f"**Changes made:** {result['changes_made']}")
         st.text_area("Judge feedback", result["judge_feedback"], height=100, disabled=True, key="iter_feedback")
+
+        used_examples = result.get("structured_examples") or []
+        if used_examples:
+            st.markdown("**Failing examples used**")
+            _render_structured_examples_readonly(used_examples)
+
         if st.button("Clear results", key="clear_iterate"):
             del st.session_state["iterate_result"]
             st.rerun()
