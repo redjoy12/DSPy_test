@@ -13,12 +13,17 @@ from src.store.prompt_store import PromptStore, PromptVersion
 # Session state
 # ---------------------------------------------------------------------------
 
+
 def init_session_state():
+    from src.config_loader import get_temperature, get_max_tokens
+
     defaults = {
         "api_key": "",
         "models": [],
         "selected_model": None,
         "prompts_dir": "prompts",
+        "temperature": get_temperature(),
+        "max_tokens": get_max_tokens(),
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -29,6 +34,7 @@ def init_session_state():
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 @st.cache_data(ttl=300)
 def fetch_models(api_key: str) -> list[str]:
     """Call OpenAI API and return sorted list of chat model IDs."""
@@ -37,9 +43,7 @@ def fetch_models(api_key: str) -> list[str]:
     client = openai.OpenAI(api_key=api_key)
     models = client.models.list()
     chat_prefixes = ("gpt-3.5", "gpt-4", "chatgpt", "o1", "o3", "o4")
-    chat_models = sorted(
-        m.id for m in models.data if m.id.startswith(chat_prefixes)
-    )
+    chat_models = sorted(m.id for m in models.data if m.id.startswith(chat_prefixes))
     return chat_models
 
 
@@ -60,6 +64,7 @@ def validate_prompt_name(name: str) -> str:
 def validate_relative_path(path: str) -> str:
     """Reject absolute paths and '..' components."""
     from pathlib import PurePath
+
     p = PurePath(path)
     if p.is_absolute() or ".." in p.parts:
         raise ValueError("Path must be relative and must not contain '..' components.")
@@ -79,7 +84,11 @@ def ensure_lm_configured(model: str):
     This is intended for local single-user use only.
     """
     os.environ["OPENAI_API_KEY"] = st.session_state["api_key"]
-    configure_lm(model=format_model_for_dspy(model))
+    configure_lm(
+        model=format_model_for_dspy(model),
+        temperature=st.session_state.get("temperature"),
+        max_tokens=st.session_state.get("max_tokens"),
+    )
 
 
 def require_api_key() -> bool:
@@ -101,7 +110,9 @@ def display_score(label: str, score: float):
     st.markdown(f"**{label}:** :{color}[{score:.2f}]")
 
 
-def render_diff(text_a: str, text_b: str, label_a: str = "Before", label_b: str = "After"):
+def render_diff(
+    text_a: str, text_b: str, label_a: str = "Before", label_b: str = "After"
+):
     """Show a unified diff between two texts."""
     diff = difflib.unified_diff(
         text_a.splitlines(keepends=True),
@@ -119,6 +130,7 @@ def render_diff(text_a: str, text_b: str, label_a: str = "Before", label_b: str 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
+
 
 def render_sidebar():
     with st.sidebar:
@@ -178,18 +190,50 @@ def render_sidebar():
             help="Directory where prompt versions are stored (relative path only).",
         )
         from pathlib import PurePath
+
         p = PurePath(prompts_dir)
         if p.is_absolute() or ".." in p.parts:
-            st.error("Prompts directory must be a relative path without '..' components.")
+            st.error(
+                "Prompts directory must be a relative path without '..' components."
+            )
         else:
             if prompts_dir != st.session_state["prompts_dir"]:
                 st.session_state["prompts_dir"] = prompts_dir
                 st.rerun()
 
+        st.divider()
+
+        st.subheader("LLM Settings")
+
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=2.0,
+            value=st.session_state["temperature"],
+            step=0.1,
+            help="Higher values produce more creative outputs. 0.5 recommended for prompt engineering.",
+        )
+        if temperature != st.session_state["temperature"]:
+            st.session_state["temperature"] = temperature
+
+        max_tokens = st.number_input(
+            "Max tokens",
+            min_value=100,
+            max_value=32000,
+            value=st.session_state["max_tokens"],
+            step=100,
+            help="Maximum tokens in LLM response. Increase if responses are truncated.",
+        )
+        if max_tokens != st.session_state["max_tokens"]:
+            st.session_state["max_tokens"] = max_tokens
+
+        st.caption(f"Config source: llm_config.json (editable)")
+
 
 # ---------------------------------------------------------------------------
 # Tab 3: Browse Versions
 # ---------------------------------------------------------------------------
+
 
 def render_browse_tab():
     store = get_store()
@@ -225,8 +269,20 @@ def render_browse_tab():
         if ver.description:
             st.markdown(f"**Description:** {ver.description}")
 
-    st.text_area("Prompt text", ver.prompt_text, height=200, disabled=True, key="browse_prompt_text")
-    st.text_area("Judge feedback", ver.judge_feedback, height=100, disabled=True, key="browse_feedback")
+    st.text_area(
+        "Prompt text",
+        ver.prompt_text,
+        height=200,
+        disabled=True,
+        key="browse_prompt_text",
+    )
+    st.text_area(
+        "Judge feedback",
+        ver.judge_feedback,
+        height=100,
+        disabled=True,
+        key="browse_feedback",
+    )
 
     if ver.change_request:
         st.markdown(f"**Change request:** {ver.change_request}")
@@ -261,6 +317,7 @@ def render_browse_tab():
 # Tab 1: Create Prompt
 # ---------------------------------------------------------------------------
 
+
 def render_create_tab():
     if not require_api_key():
         return
@@ -271,15 +328,24 @@ def render_create_tab():
         return
 
     with st.form("create_form"):
-        name = st.text_input("Prompt name", max_chars=100, help="Identifier for this prompt (e.g. 'email-assistant').")
+        name = st.text_input(
+            "Prompt name",
+            max_chars=100,
+            help="Identifier for this prompt (e.g. 'email-assistant').",
+        )
         description = st.text_input("Description", help="What the prompt should do.")
         context = st.text_area(
-            "Context (optional)", help="Target audience, tone, constraints, etc.",
+            "Context (optional)",
+            help="Target audience, tone, constraints, etc.",
             max_chars=5000,
         )
         model = st.selectbox("Model", models, key="create_model")
         min_score = st.slider(
-            "Minimum quality score", 0.0, 1.0, 0.0, 0.05,
+            "Minimum quality score",
+            0.0,
+            1.0,
+            0.0,
+            0.05,
             help="Set above 0 to reject low-quality prompts.",
         )
         submitted = st.form_submit_button("Create Prompt")
@@ -321,9 +387,21 @@ def render_create_tab():
     result = st.session_state.get("create_result")
     if result:
         st.success(f"Prompt **{result['name']}** v{result['version']} created!")
-        st.text_area("Generated prompt", result["prompt_text"], height=200, disabled=True, key="create_prompt_text")
+        st.text_area(
+            "Generated prompt",
+            result["prompt_text"],
+            height=200,
+            disabled=True,
+            key="create_prompt_text",
+        )
         display_score("Quality score", result["quality_score"])
-        st.text_area("Judge feedback", result["judge_feedback"], height=100, disabled=True, key="create_feedback")
+        st.text_area(
+            "Judge feedback",
+            result["judge_feedback"],
+            height=100,
+            disabled=True,
+            key="create_feedback",
+        )
         if st.button("Clear results", key="clear_create"):
             del st.session_state["create_result"]
             st.rerun()
@@ -332,6 +410,7 @@ def render_create_tab():
 # ---------------------------------------------------------------------------
 # Tab 2: Iterate Prompt
 # ---------------------------------------------------------------------------
+
 
 def _render_structured_examples_editor(prompt_name: str) -> list[dict]:
     """Render the structured failing-examples editor outside the iterate form.
@@ -425,15 +504,16 @@ def _sanitize_structured_examples(examples: list[dict]) -> list[dict]:
     cleaned: list[dict] = []
     for ex in examples:
         messages = [
-            {"role": m.get("role", "human"), "content": (m.get("content") or "").strip()}
+            {
+                "role": m.get("role", "human"),
+                "content": (m.get("content") or "").strip(),
+            }
             for m in ex.get("messages", [])
             if (m.get("content") or "").strip()
         ]
         unsat = (ex.get("unsatisfactory_output") or "").strip()
         if messages or unsat:
-            cleaned.append(
-                {"messages": messages, "unsatisfactory_output": unsat}
-            )
+            cleaned.append({"messages": messages, "unsatisfactory_output": unsat})
     return cleaned
 
 
@@ -443,7 +523,13 @@ def _render_structured_examples_readonly(examples: list[dict]):
         with st.expander(f"Example {i}", expanded=False):
             for msg in ex.get("messages", []) or []:
                 role = str(msg.get("role", "")).strip().lower()
-                badge = "HUMAN" if role == "human" else "ASSISTANT" if role == "assistant" else role.upper()
+                badge = (
+                    "HUMAN"
+                    if role == "human"
+                    else "ASSISTANT"
+                    if role == "assistant"
+                    else role.upper()
+                )
                 st.markdown(f"`{badge}`")
                 st.markdown(f"> {msg.get('content', '')}")
             unsat = ex.get("unsatisfactory_output") or ""
@@ -490,10 +576,16 @@ def render_iterate_tab():
     structured_examples = _render_structured_examples_editor(selected_name)
 
     with st.form("iterate_form"):
-        change_request = st.text_area("Change request", help="What to add, modify, or fix.", max_chars=5000)
+        change_request = st.text_area(
+            "Change request", help="What to add, modify, or fix.", max_chars=5000
+        )
         model = st.selectbox("Model", models, key="iterate_model")
         min_score = st.slider(
-            "Minimum improvement score", 0.0, 1.0, 0.0, 0.05,
+            "Minimum improvement score",
+            0.0,
+            1.0,
+            0.0,
+            0.05,
             help="Set above 0 to reject low-quality iterations.",
         )
         submitted = st.form_submit_button("Iterate Prompt")
@@ -546,15 +638,29 @@ def render_iterate_tab():
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Before**")
-            st.text_area("Before", saved_before, height=200, disabled=True, key="iter_before")
+            st.text_area(
+                "Before", saved_before, height=200, disabled=True, key="iter_before"
+            )
         with col2:
             st.markdown("**After**")
-            st.text_area("After", result["prompt_text"], height=200, disabled=True, key="iter_after")
+            st.text_area(
+                "After",
+                result["prompt_text"],
+                height=200,
+                disabled=True,
+                key="iter_after",
+            )
 
         display_score("Improvement score", result["quality_score"])
         if result["changes_made"]:
             st.markdown(f"**Changes made:** {result['changes_made']}")
-        st.text_area("Judge feedback", result["judge_feedback"], height=100, disabled=True, key="iter_feedback")
+        st.text_area(
+            "Judge feedback",
+            result["judge_feedback"],
+            height=100,
+            disabled=True,
+            key="iter_feedback",
+        )
 
         used_examples = result.get("structured_examples") or []
         if used_examples:
@@ -569,6 +675,7 @@ def render_iterate_tab():
 # ---------------------------------------------------------------------------
 # Tab 4: Optimize
 # ---------------------------------------------------------------------------
+
 
 def render_optimize_tab():
     if not require_api_key():
@@ -589,8 +696,8 @@ def render_optimize_tab():
             height=200,
             max_chars=50000,
             help=(
-                "JSON array of objects. For Create: [{\"description\": ..., \"context\": ...}]. "
-                "For Iterate: [{\"current_prompt\": ..., \"change_request\": ...}]."
+                'JSON array of objects. For Create: [{"description": ..., "context": ...}]. '
+                'For Iterate: [{"current_prompt": ..., "change_request": ...}].'
             ),
         )
 
@@ -613,7 +720,9 @@ def render_optimize_tab():
 
     if submitted:
         if not cost_confirmed:
-            st.error("Please confirm you understand the API cost before running optimization.")
+            st.error(
+                "Please confirm you understand the API cost before running optimization."
+            )
             return
 
         if not training_json.strip():
@@ -627,10 +736,11 @@ def render_optimize_tab():
                 st.error(str(exc))
                 return
             from pathlib import Path
+
             if not save_path.endswith(".json"):
                 st.warning("Save path should end with '.json' for DSPy compatibility.")
             parent = Path(save_path).parent
-            if str(parent) != '.' and not parent.exists():
+            if str(parent) != "." and not parent.exists():
                 st.error(f"Directory '{parent}' does not exist.")
                 return
 
@@ -662,19 +772,25 @@ def render_optimize_tab():
                     return
                 extra = [k for k in ex if k not in input_keys]
                 if extra:
-                    st.warning(f"Example {i + 1} has extra keys that will be passed through: {', '.join(extra)}")
+                    st.warning(
+                        f"Example {i + 1} has extra keys that will be passed through: {', '.join(extra)}"
+                    )
             trainset = [dspy.Example(**ex).with_inputs(*input_keys) for ex in parsed]
 
             runner = OptimizerRunner()
             optimizer_cls = runner.select_optimizer(len(parsed))
-            st.info(f"Using optimizer: **{optimizer_cls.__name__}** (based on {len(parsed)} examples)")
+            st.info(
+                f"Using optimizer: **{optimizer_cls.__name__}** (based on {len(parsed)} examples)"
+            )
 
             if pipeline_choice == "Create":
                 from src.pipelines.create_prompt import CreatePromptPipeline
+
                 program = CreatePromptPipeline(store=get_store())
                 metric = make_quality_metric()
             else:
                 from src.pipelines.iterate_prompt import IteratePromptPipeline
+
                 program = IteratePromptPipeline(store=get_store())
                 metric = make_comparison_metric()
 
@@ -716,9 +832,13 @@ def render_optimize_tab():
                 "more diverse training examples."
             )
         else:
-            st.info(f"Optimization produced **{num_demos}** bootstrapped demo(s) across all predictors.")
+            st.info(
+                f"Optimization produced **{num_demos}** bootstrapped demo(s) across all predictors."
+            )
             for pred_name, demos in result["demos_by_predictor"].items():
-                with st.expander(f"Bootstrapped demos for `{pred_name}` ({len(demos)})"):
+                with st.expander(
+                    f"Bootstrapped demos for `{pred_name}` ({len(demos)})"
+                ):
                     for i, demo in enumerate(demos):
                         st.markdown(f"**Demo {i + 1}**")
                         st.json(demo)
@@ -732,6 +852,7 @@ def render_optimize_tab():
 # ---------------------------------------------------------------------------
 # Tab 5: Upload Jinja2 Template
 # ---------------------------------------------------------------------------
+
 
 def render_upload_tab():
     uploaded = st.file_uploader(
@@ -799,7 +920,9 @@ def render_upload_tab():
 
     result = st.session_state.get("upload_result")
     if result:
-        st.success(f"Saved **{result['name']}** v{result['version']}. You can now iterate on it in the **Iterate** tab.")
+        st.success(
+            f"Saved **{result['name']}** v{result['version']}. You can now iterate on it in the **Iterate** tab."
+        )
         if st.button("Clear results", key="clear_upload"):
             del st.session_state["upload_result"]
             st.rerun()
@@ -808,6 +931,7 @@ def render_upload_tab():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     st.set_page_config(page_title="PromptForge", layout="wide")

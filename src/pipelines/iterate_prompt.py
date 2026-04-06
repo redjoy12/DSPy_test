@@ -7,12 +7,15 @@ from src.store.prompt_store import PromptStore, PromptVersion
 class IteratePromptSignature(dspy.Signature):
     """Improve an existing prompt based on a change request and optional failing examples.
     Preserve what works well in the original prompt while addressing the requested changes."""
+
     current_prompt: str = dspy.InputField(desc="the existing prompt to improve")
     change_request: str = dspy.InputField(desc="what to add, modify, or fix")
     failing_examples: str = dspy.InputField(
         desc="optional: input/output pairs where the current prompt fails"
     )
-    improved_prompt: str = dspy.OutputField(desc="the updated prompt incorporating the changes")
+    improved_prompt: str = dspy.OutputField(
+        desc="the updated prompt incorporating the changes"
+    )
     changes_made: str = dspy.OutputField(desc="summary of what was changed and why")
 
 
@@ -114,10 +117,11 @@ class IteratePromptPipeline(dspy.Module):
             ctx = dspy.context(lm=lm)
         else:
             from contextlib import nullcontext
+
             ctx = nullcontext()
 
         with ctx:
-            result = self.forward(
+            result = self(
                 current_prompt=current_prompt,
                 change_request=change_request,
                 failing_examples=failing_examples,
@@ -136,7 +140,9 @@ class IteratePromptPipeline(dspy.Module):
             )
 
         # Record the actual model used in metadata.
-        actual_model = model or getattr(getattr(dspy.settings, 'lm', None), 'model', 'unknown')
+        actual_model = model or getattr(
+            getattr(dspy.settings, "lm", None), "model", "unknown"
+        )
         version_num = self.store.get_next_version(name)
         version = PromptVersion(
             version=version_num,
