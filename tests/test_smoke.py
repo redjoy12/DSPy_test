@@ -6,6 +6,7 @@ make actual API calls. They are excluded from the default test suite.
 
 Run with: python -m pytest tests/test_smoke.py -m integration
 """
+
 import pytest
 import dspy
 
@@ -21,8 +22,10 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(autouse=True)
-def setup_lm():
+def setup_lm(pytestconfig):
     """Configure a real LLM for integration tests."""
+    if "integration" not in pytestconfig.getmarkers("integration"):
+        pytest.skip("Integration test only")
     configure_lm(model="openai/gpt-4o-mini")
 
 

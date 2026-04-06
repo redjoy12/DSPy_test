@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import Optional
+
 import dspy
 
 from src.evaluation.judge import PromptQualityJudge
@@ -8,6 +11,7 @@ class CreatePromptSignature(dspy.Signature):
     """Generate a high-quality LLM prompt from a human language description.
     The prompt should include a clear role, specific instructions, constraints,
     and output format guidance as appropriate."""
+
     description: str = dspy.InputField(desc="what the prompt should do")
     context: str = dspy.InputField(desc="optional: target audience, tone, constraints")
     prompt_text: str = dspy.OutputField(desc="the complete, ready-to-use prompt")
@@ -18,8 +22,8 @@ class CreatePromptPipeline(dspy.Module):
     def __init__(
         self,
         generate_module=None,
-        judge: PromptQualityJudge | None = None,
-        store: PromptStore | None = None,
+        judge: Optional[PromptQualityJudge] = None,
+        store: Optional[PromptStore] = None,
     ):
         super().__init__()
         self.generate = generate_module or dspy.ChainOfThought(CreatePromptSignature)
@@ -34,8 +38,8 @@ class CreatePromptPipeline(dspy.Module):
         name: str,
         description: str,
         context: str = "",
-        model: str | None = None,
-        min_score: float | None = None,
+        model: Optional[str] = None,
+        min_score: Optional[float] = None,
     ) -> PromptVersion:
         """Generate a prompt from a description, evaluate it, and save a versioned record.
 
@@ -61,6 +65,7 @@ class CreatePromptPipeline(dspy.Module):
             ctx = dspy.context(lm=lm)
         else:
             from contextlib import nullcontext
+
             ctx = nullcontext()
 
         with ctx:
@@ -77,7 +82,9 @@ class CreatePromptPipeline(dspy.Module):
             )
 
         # Record the actual model used in metadata.
-        actual_model = model or getattr(getattr(dspy.settings, 'lm', None), 'model', 'unknown')
+        actual_model = model or getattr(
+            getattr(dspy.settings, "lm", None), "model", "unknown"
+        )
         version_num = self.store.get_next_version(name)
         version = PromptVersion(
             version=version_num,

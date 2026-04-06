@@ -1,5 +1,7 @@
+from __future__ import annotations
 import logging
 from contextlib import nullcontext
+from typing import Callable, Optional
 
 import dspy
 
@@ -38,9 +40,9 @@ class IteratePromptPipeline(dspy.Module):
     def __init__(
         self,
         generate_module=None,
-        judge: PromptQualityJudge | None = None,
-        store: PromptStore | None = None,
-        pattern_extractor: PatternExtractor | None = None,
+        judge: Optional[PromptQualityJudge] = None,
+        store: Optional[PromptStore] = None,
+        pattern_extractor: Optional[PatternExtractor] = None,
     ):
         super().__init__()
         self.generate = generate_module or dspy.ChainOfThought(IteratePromptSignature)
@@ -64,14 +66,14 @@ class IteratePromptPipeline(dspy.Module):
         self,
         name: str,
         change_request: str,
-        current_prompt: str | None = None,
-        description: str | None = None,
+        current_prompt: Optional[str] = None,
+        description: Optional[str] = None,
         failing_examples: str = "",
-        structured_examples: list[dict] | None = None,
-        model: str | None = None,
-        min_score: float | None = None,
+        structured_examples: Optional[list[dict]] = None,
+        model: Optional[str] = None,
+        min_score: Optional[float] = None,
         interactive: bool = False,
-        prompt_func: callable | None = None,
+        prompt_func: Optional[Callable] = None,
     ) -> PromptVersion:
         """Improve an existing prompt, evaluate the result, and save a new version.
 
@@ -266,7 +268,7 @@ class IteratePromptPipeline(dspy.Module):
     def _build_changes_made(
         self,
         original_examples: str,
-        structured_examples: list[dict] | None,
+        structured_examples: Optional[list[dict]],
         abstracted_pattern: str,
         result_changes: str,
         validation_result: ValidationResult,

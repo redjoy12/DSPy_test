@@ -1,4 +1,5 @@
-from typing import Callable
+from __future__ import annotations
+from typing import Callable, Optional
 
 import dspy
 
@@ -9,7 +10,7 @@ class OptimizerRunner:
     def select_optimizer(
         self,
         num_examples: int,
-        optimizer_name: str | None = None,
+        optimizer_name: Optional[str] = None,
     ) -> type:
         if optimizer_name:
             try:
@@ -20,9 +21,7 @@ class OptimizerRunner:
                     f"Must be a valid dspy optimizer class (e.g. 'BootstrapFewShot', 'MIPROv2')."
                 )
             if not isinstance(cls, type):
-                raise ValueError(
-                    f"'{optimizer_name}' is not an optimizer class."
-                )
+                raise ValueError(f"'{optimizer_name}' is not an optimizer class.")
             return cls
         if num_examples < self.OPTIMIZER_THRESHOLD:
             return dspy.BootstrapFewShot
@@ -33,8 +32,8 @@ class OptimizerRunner:
         program: dspy.Module,
         trainset: list,
         metric: Callable,
-        optimizer_name: str | None = None,
-        save_path: str | None = None,
+        optimizer_name: Optional[str] = None,
+        save_path: Optional[str] = None,
         **kwargs,
     ) -> dspy.Module:
         optimizer_cls = self.select_optimizer(
@@ -42,7 +41,7 @@ class OptimizerRunner:
             optimizer_name=optimizer_name,
         )
 
-        cls_name = getattr(optimizer_cls, '__name__', '')
+        cls_name = getattr(optimizer_cls, "__name__", "")
         if cls_name == "MIPROv2":
             optimizer = optimizer_cls(metric=metric, auto="medium", **kwargs)
         elif cls_name == "BootstrapFewShot":

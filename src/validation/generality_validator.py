@@ -1,5 +1,7 @@
+from __future__ import annotations
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 
 STOP_WORDS = frozenset(
@@ -103,7 +105,7 @@ STOP_WORDS = frozenset(
 class ValidationResult:
     is_valid: bool
     reason: str
-    detected_literals: list[str] | None = None
+    detected_literals: Optional[list[str]] = None
 
 
 def normalize_text(text: str) -> str:
