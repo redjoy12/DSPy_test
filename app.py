@@ -6,7 +6,7 @@ import os
 import streamlit as st
 
 from src.config import configure_lm
-from src.store.prompt_store import PromptStore
+from src.store.prompt_store import PromptStore, PromptVersion
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +599,82 @@ def render_optimize_tab():
 
 
 # ---------------------------------------------------------------------------
+# Tab 5: Upload Jinja2 Template
+# ---------------------------------------------------------------------------
+
+def render_upload_tab():
+    uploaded = st.file_uploader(
+        "Upload a Jinja2 prompt template",
+        type=["jinja2", "j2"],
+        help="Upload a .jinja2 or .j2 file. The raw template text will be stored as the prompt.",
+    )
+
+    if uploaded is not None:
+        try:
+            template_text = uploaded.read().decode("utf-8")
+        except UnicodeDecodeError:
+            st.error("File is not valid UTF-8 text.")
+            return
+
+        st.text_area(
+            "Template preview",
+            template_text,
+            height=250,
+            disabled=True,
+            key="upload_preview",
+        )
+
+        with st.form("upload_form"):
+            name = st.text_input(
+                "Prompt name",
+                max_chars=100,
+                help="Identifier for this prompt (e.g. 'email-assistant').",
+            )
+            description = st.text_input(
+                "Description",
+                help="What this prompt template does.",
+            )
+            submitted = st.form_submit_button("Save as Prompt")
+
+        if submitted:
+            if not name or not description:
+                st.error("Name and description are required.")
+                return
+
+            try:
+                name = validate_prompt_name(name)
+                store = get_store()
+                version_num = store.get_next_version(name)
+                version = PromptVersion(
+                    version=version_num,
+                    parent_version=version_num - 1 if version_num > 1 else None,
+                    prompt_text=template_text,
+                    description=description,
+                    quality_score=0.0,
+                    judge_feedback="",
+                    pipeline="upload",
+                    model="n/a",
+                )
+                store.save(name, version)
+
+                st.session_state["upload_result"] = {
+                    "name": name,
+                    "version": version_num,
+                }
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+
+    result = st.session_state.get("upload_result")
+    if result:
+        st.success(f"Saved **{result['name']}** v{result['version']}. You can now iterate on it in the **Iterate** tab.")
+        if st.button("Clear results", key="clear_upload"):
+            del st.session_state["upload_result"]
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -610,8 +686,8 @@ def main():
     init_session_state()
     render_sidebar()
 
-    tab_create, tab_iterate, tab_browse, tab_optimize = st.tabs(
-        ["Create", "Iterate", "Browse", "Optimize"]
+    tab_create, tab_iterate, tab_browse, tab_optimize, tab_upload = st.tabs(
+        ["Create", "Iterate", "Browse", "Optimize", "Upload"]
     )
 
     with tab_create:
@@ -622,6 +698,8 @@ def main():
         render_browse_tab()
     with tab_optimize:
         render_optimize_tab()
+    with tab_upload:
+        render_upload_tab()
 
 
 if __name__ == "__main__":
