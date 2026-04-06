@@ -12,6 +12,7 @@ class TestConsolidatePromptSignature:
     def test_input_fields(self):
         fields = ConsolidatePromptSignature.input_fields
         assert "raw_prompt" in fields
+        assert "original_prompt" in fields
         assert "change_request" in fields
         assert "abstracted_pattern" in fields
 
@@ -37,6 +38,7 @@ class TestPromptConsolidator:
             consolidator = PromptConsolidator()
             consolidated, notes = consolidator(
                 raw_prompt="You are an assistant. Be concise. Keep responses short. Mention Acme Pro by name.",
+                original_prompt="You are an assistant. Be concise.",
                 change_request="Make it general",
                 abstracted_pattern="Issue: too verbose\nPattern: long answers\nRoot cause: missing brevity rule",
             )
@@ -57,7 +59,10 @@ class TestPromptConsolidator:
         with dspy.context(lm=lm):
             consolidator = PromptConsolidator()
             consolidated, notes = consolidator(
-                raw_prompt="raw", change_request="cr", abstracted_pattern=""
+                raw_prompt="raw",
+                original_prompt="base",
+                change_request="cr",
+                abstracted_pattern="",
             )
         assert consolidated == "cleaned prompt"
         assert notes == "notes here"
@@ -78,6 +83,7 @@ class TestPromptConsolidator:
             with pytest.raises(RuntimeError, match="empty"):
                 consolidator(
                     raw_prompt="some prompt",
+                    original_prompt="base",
                     change_request="cr",
                     abstracted_pattern="",
                 )
@@ -89,7 +95,12 @@ class TestPromptConsolidator:
 
         consolidator = PromptConsolidator(consolidator_module=ExplodingModule())
         with pytest.raises(RuntimeError, match="Consolidation failed"):
-            consolidator(raw_prompt="x", change_request="cr", abstracted_pattern="")
+            consolidator(
+                raw_prompt="x",
+                original_prompt="base",
+                change_request="cr",
+                abstracted_pattern="",
+            )
 
     def test_forward_passes_inputs_through_to_llm(self):
         captured: dict = {}
@@ -105,13 +116,50 @@ class TestPromptConsolidator:
         consolidator = PromptConsolidator(consolidator_module=_CapturingModule())
         consolidator(
             raw_prompt="raw text",
+            original_prompt="the baseline prompt",
             change_request="the change request",
             abstracted_pattern="the abstracted pattern",
         )
 
         assert captured["raw_prompt"] == "raw text"
+        assert captured["original_prompt"] == "the baseline prompt"
         assert captured["change_request"] == "the change request"
         assert captured["abstracted_pattern"] == "the abstracted pattern"
+
+    def test_forward_requires_original_prompt(self):
+        """original_prompt is required — consolidator has no baseline without it."""
+        consolidator = PromptConsolidator()
+        with pytest.raises(TypeError):
+            # Intentionally omit original_prompt to confirm it's required.
+            consolidator(raw_prompt="x", change_request="cr", abstracted_pattern="")
+
+    def test_captures_original_prompt_for_baseline(self):
+        """The original prompt is forwarded verbatim so the LLM can use it as the baseline."""
+        captured: dict = {}
+
+        class _CapturingModule:
+            def __call__(self, **kwargs):
+                captured.update(kwargs)
+                return dspy.Prediction(
+                    consolidated_prompt="final", consolidation_notes="n"
+                )
+
+        baseline = (
+            "You are a senior code reviewer.\n"
+            "1. Be concise.\n"
+            "2. Use a direct tone.\n"
+        )
+        consolidator = PromptConsolidator(consolidator_module=_CapturingModule())
+        consolidator(
+            raw_prompt=baseline + "3. Also mention product pricing when asked.",
+            original_prompt=baseline,
+            change_request="handle pricing questions",
+            abstracted_pattern="",
+        )
+
+        # Baseline must reach the signature byte-for-byte, otherwise the LLM
+        # cannot enforce the off-limits rule.
+        assert captured["original_prompt"] == baseline
 
     def test_default_module_is_chain_of_thought(self):
         """When no consolidator_module is injected, defaults to ChainOfThought of the signature."""

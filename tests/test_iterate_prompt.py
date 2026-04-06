@@ -16,7 +16,9 @@ class _PassthroughConsolidator:
     different stub or the real PromptConsolidator with a primed DummyLM.
     """
 
-    def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+    def __call__(
+        self, raw_prompt, original_prompt="", change_request="", abstracted_pattern=""
+    ):
         return raw_prompt, ""
 
 
@@ -507,7 +509,13 @@ class TestIterateAndSave:
         self._create_v1(store)
 
         class _RewritingConsolidator:
-            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+            def __call__(
+                self,
+                raw_prompt,
+                original_prompt="",
+                change_request="",
+                abstracted_pattern="",
+            ):
                 return ("CONSOLIDATED VERSION", "merged 2 rules; scrubbed 1 specific name")
 
         lm = DummyLM(
@@ -549,7 +557,13 @@ class TestIterateAndSave:
         self._create_v1(store)
 
         class _ExplodingConsolidator:
-            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+            def __call__(
+                self,
+                raw_prompt,
+                original_prompt="",
+                change_request="",
+                abstracted_pattern="",
+            ):
                 raise RuntimeError("consolidator boom")
 
         lm = DummyLM(
@@ -580,14 +594,21 @@ class TestIterateAndSave:
         assert "Consolidation (scrub + merge)" not in v2.changes_made
 
     def test_consolidator_runs_after_iterate_with_correct_inputs(self, store):
-        """The consolidator receives the iterate output, change_request, and abstracted pattern."""
+        """The consolidator receives the iterate output, original_prompt (baseline), change_request, and abstracted pattern."""
         self._create_v1(store)
 
         captured: dict = {}
 
         class _CapturingConsolidator:
-            def __call__(self, raw_prompt, change_request="", abstracted_pattern=""):
+            def __call__(
+                self,
+                raw_prompt,
+                original_prompt="",
+                change_request="",
+                abstracted_pattern="",
+            ):
                 captured["raw_prompt"] = raw_prompt
+                captured["original_prompt"] = original_prompt
                 captured["change_request"] = change_request
                 captured["abstracted_pattern"] = abstracted_pattern
                 return ("a clean consolidated prompt", "merged notes")
@@ -630,6 +651,10 @@ class TestIterateAndSave:
             )
 
         assert captured["raw_prompt"] == "RAW iterate output"
+        # The baseline fed to the consolidator must be the v1 prompt text
+        # loaded from the store — this is the regression guard ensuring
+        # consolidation is scoped to the delta, not the whole prompt.
+        assert captured["original_prompt"] == "You are a coding assistant."
         assert captured["change_request"] == "Handle unanswerable questions"
         assert "Issue:" in captured["abstracted_pattern"]
         assert "Pattern:" in captured["abstracted_pattern"]

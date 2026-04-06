@@ -202,6 +202,7 @@ class IteratePromptPipeline(dspy.Module):
                 try:
                     consolidated_prompt, consolidation_notes = self.consolidator(
                         raw_prompt=result.improved_prompt,
+                        original_prompt=current_prompt,
                         change_request=change_request,
                         abstracted_pattern=abstracted_pattern,
                     )
